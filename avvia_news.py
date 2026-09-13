@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime
 import json
+import re
 
 
 # ============================================================
@@ -127,6 +128,7 @@ def salva_pubblicazione_database(pubblicazione, url):
             "testo_pagina",
             ""
         )
+
         documenti = pubblicazione.get(
             "documenti",
             []
@@ -161,8 +163,6 @@ def salva_pubblicazione_database(pubblicazione, url):
                 "novembre": 11,
                 "dicembre": 12
             }
-
-            import re
 
             match_aggiornamento = re.search(
                 r"ultimo aggiornamento\s+(\d{1,2})\s+([a-zà]+)\s+(\d{4})",
@@ -249,33 +249,49 @@ def salva_pubblicazione_database(pubblicazione, url):
 
         risultato = cur.fetchone()
 
-if risultato:
+        # ----------------------------------------------------
+        # PUBBLICAZIONE GIÀ PRESENTE
+        # ----------------------------------------------------
 
-    impronta_esistente = risultato[0]
+        if risultato:
 
-    if impronta_esistente == impronta:
+            impronta_esistente = risultato[0]
 
-        print("ℹ️ Pubblicazione già presente e invariata")
+            # ------------------------------------------------
+            # PUBBLICAZIONE INVARIATA
+            # ------------------------------------------------
 
-        cur.execute(
-            """
-            UPDATE pubblicazioni_monitorate
-            SET ultima_verifica = CURRENT_TIMESTAMP
-            WHERE url = %s
-            """,
-            (url,)
-        )
+            if impronta_esistente == impronta:
 
-        conn.commit()
+                print(
+                    "ℹ️ Pubblicazione già presente e invariata"
+                )
 
-        cur.close()
-        conn.close()
+                cur.execute(
+                    """
+                    UPDATE pubblicazioni_monitorate
+                    SET ultima_verifica = CURRENT_TIMESTAMP
+                    WHERE url = %s
+                    """,
+                    (url,)
+                )
 
-        return
+                conn.commit()
 
-    else:
+                cur.close()
+                conn.close()
 
-        print("🔄 Pubblicazione già presente ma modificata")
+                return
+
+            # ------------------------------------------------
+            # PUBBLICAZIONE MODIFICATA
+            # ------------------------------------------------
+
+            else:
+
+                print(
+                    "🔄 Pubblicazione già presente ma modificata"
+                )
 
         # ----------------------------------------------------
         # INSERIMENTO NEL DATABASE
@@ -293,7 +309,7 @@ if risultato:
                 documenti,
                 impronta
             )
-            VALUES (%s, %s, %s, %s, %s, %s,%s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (url) DO NOTHING
             """,
             (
@@ -517,8 +533,6 @@ def estrai_dati_pubblicazione(url):
         # ----------------------------------------------------
 
         data_pubblicazione = ""
-
-        import re
 
         match_data = re.search(
             r"\b(\d{2}/\d{2}/\d{2,4})\s*-\s*Si comunica",
