@@ -235,6 +235,33 @@ def salva_pubblicazione_database(pubblicazione, url):
         ).hexdigest()
 
         # ----------------------------------------------------
+        # CONTROLLO PUBBLICAZIONE GIÀ PRESENTE
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            SELECT impronta
+            FROM pubblicazioni_monitorate
+            WHERE url = %s
+            """,
+            (url,)
+        )
+
+        risultato = cur.fetchone()
+
+        if risultato:
+
+            impronta_esistente = risultato[0]
+
+            if impronta_esistente == impronta:
+
+                print("ℹ️ Pubblicazione già presente e invariata")
+
+            else:
+
+                print("🔄 Pubblicazione già presente ma modificata")
+
+        # ----------------------------------------------------
         # INSERIMENTO NEL DATABASE
         # ----------------------------------------------------
 
