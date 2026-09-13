@@ -256,6 +256,7 @@ def salva_pubblicazione_database(pubblicazione, url):
             (
                 titolo,
                 data_pubblicazione,
+                ultimo_aggiornamento,
                 url,
                 testo_pagina,
                 documenti,
