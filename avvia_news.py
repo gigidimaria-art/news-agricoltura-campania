@@ -73,7 +73,76 @@ def verifica_database():
     except Exception as e:
         print(f"❌ Errore collegamento database: {e}")
         return False
+# ============================================================
+# ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
+# ============================================================
 
+def estrai_pubblicazioni_archivio():
+    try:
+        headers = {
+            "User-Agent": USER_AGENT
+        }
+
+        response = requests.get(
+            URL_ARCHIVIO,
+            headers=headers,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        pubblicazioni = []
+
+        # Cerchiamo tutti i collegamenti presenti nell'archivio
+        for link in soup.find_all("a", href=True):
+
+            titolo = link.get_text(" ", strip=True)
+
+            if not titolo:
+                continue
+
+            url = urljoin(URL_ARCHIVIO, link["href"])
+
+            # Consideriamo solo i collegamenti alle singole pubblicazioni
+            if "/comunicati/" not in url:
+                continue
+
+            # Evitiamo collegamenti tecnici o duplicati
+            if url == URL_ARCHIVIO:
+                continue
+
+            if any(p["url"] == url for p in pubblicazioni):
+                continue
+
+            pubblicazioni.append({
+                "titolo": titolo,
+                "url": url
+            })
+
+        print("============================================")
+        print("📋 ESTRAZIONE ARCHIVIO")
+        print(f"✅ Pubblicazioni individuate: {len(pubblicazioni)}")
+
+        for i, pubblicazione in enumerate(pubblicazioni, start=1):
+            print(f"{i}. {pubblicazione['titolo']}")
+            print(f"   {pubblicazione['url']}")
+
+        print("============================================")
+
+        return pubblicazioni
+
+    except Exception as e:
+        print(f"❌ Errore estrazione archivio: {e}")
+        return []
+
+
+# ============================================================
+# TEST ESTRAZIONE ARCHIVIO
+# ============================================================
+
+estrai_pubblicazioni_archivio()
 
 # ============================================================
 # AVVIO
