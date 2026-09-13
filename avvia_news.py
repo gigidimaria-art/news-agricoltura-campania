@@ -188,28 +188,23 @@ def estrai_dati_pubblicazione(url):
 
         testo_pagina = soup.get_text(" ", strip=True)
 
-# ----------------------------------------------------
-# DATA DI PUBBLICAZIONE
-# ----------------------------------------------------
+        # ----------------------------------------------------
+        # DATA DI PUBBLICAZIONE
+        # ----------------------------------------------------
 
-data_pubblicazione = ""
+        data_pubblicazione = ""
 
-# Cerchiamo la data all'inizio del testo della notizia.
-# La data della pubblicazione è normalmente nel formato:
-# 11/09/2026 - Si comunica che...
+        import re
 
-testo_comunicato = soup.get_text(" ", strip=True)
+        match_data = re.search(
+            r"\b(\d{2}/\d{2}/\d{2,4})\s*-\s*Si comunica",
+            testo_pagina,
+            re.IGNORECASE
+        )
 
-import re
+        if match_data:
+            data_pubblicazione = match_data.group(1)
 
-corrispondenza = re.search(
-    r"\b(\d{2}/\d{2}/\d{4})\s*-\s*Si comunica",
-    testo_comunicato
-)
-
-if corrispondenza:
-    data_pubblicazione = corrispondenza.group(1)
-    
         # ----------------------------------------------------
         # DOCUMENTI / LINK
         # ----------------------------------------------------
