@@ -127,6 +127,15 @@ def salva_pubblicazione_database(pubblicazione, url):
             "testo_pagina",
             ""
         )
+        documenti = pubblicazione.get(
+            "documenti",
+            []
+        )
+
+        documenti = json.dumps(
+            documenti,
+            ensure_ascii=False
+        )
 
         # ----------------------------------------------------
         # DATA ULTIMO AGGIORNAMENTO
