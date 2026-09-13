@@ -7,7 +7,7 @@ import psycopg2
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime
-
+import json
 
 # ============================================================
 # CONFIGURAZIONE GENERALE
@@ -73,6 +73,85 @@ def verifica_database():
     except Exception as e:
         print(f"❌ Errore collegamento database: {e}")
         return False
+
+# ============================================================
+# SALVATAGGIO DI UNA PUBBLICAZIONE NEL DATABASE
+# ============================================================
+
+def salva_pubblicazione_database(pubblicazione, url):
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+
+        titolo = pubblicazione.get("titolo", "")
+        data_pubblicazione = pubblicazione.get("data_pubblicazione") or None
+        testo_pagina = pubblicazione.get("testo_pagina", "")
+        ultimo_aggiornamento = None
+        documenti = json.dumps(
+            pubblicazione.get("documenti", []),
+            ensure_ascii=False
+        )
+
+        # ----------------------------------------------------
+        # IMPRONTA DEL CONTENUTO
+        # ----------------------------------------------------
+
+        contenuto = (
+            titolo
+            + "|"
+            + str(data_pubblicazione)
+            + "|"
+            + testo_pagina
+            + "|"
+            + str(ultimo_aggiornamento)
+            + "|"
+            + documenti
+        )
+
+        impronta = hashlib.sha256(
+            contenuto.encode("utf-8")
+        ).hexdigest()
+
+        # ----------------------------------------------------
+        # INSERIMENTO
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            INSERT INTO pubblicazioni_monitorate
+            (
+                titolo,
+                data_pubblicazione,
+                url,
+                testo_pagina,
+                documenti,
+                impronta
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO NOTHING
+            """,
+            (
+                titolo,
+                data_pubblicazione,
+                url,
+                testo_pagina,
+                documenti,
+                impronta
+            )
+        )
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        print("✅ Pubblicazione salvata nel database")
+
+    except Exception as e:
+
+        print(f"❌ Errore nel salvataggio nel database: {e}")
+
 # ============================================================
 # ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
 # ============================================================
