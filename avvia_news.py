@@ -250,7 +250,7 @@ def salva_pubblicazione_database(pubblicazione, url):
                 documenti,
                 impronta
             )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s,%s)
             ON CONFLICT (url) DO NOTHING
             """,
             (
