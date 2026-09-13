@@ -23,8 +23,7 @@ URL_ARCHIVIO = (
 
 USER_AGENT = "Mozilla/5.0 News-Agricoltura-Campania"
 
-INTERVALLO_CONTROLLO = 60 * 60
-
+INTERVALLO_CONTROLLO = 60
 
 # ============================================================
 # VARIABILI D'AMBIENTE
