@@ -189,16 +189,15 @@ def estrai_dati_pubblicazione(url):
         testo_pagina = soup.get_text(" ", strip=True)
 
         # ----------------------------------------------------
-# DATA DI PUBBLICAZIONE
-# ----------------------------------------------------
+        # DATA DI PUBBLICAZIONE
+        # ----------------------------------------------------
 
-data_pubblicazione = ""
+        data_pubblicazione = ""
 
-# La data di pubblicazione viene ricavata
-# dall'eventuale indicazione presente nella pagina.
-# Per ora non consideriamo le date contenute
-# nel testo della notizia, nei documenti o nelle scadenze.
-
+        # La data di pubblicazione viene ricavata
+        # dall'eventuale indicazione presente nella pagina.
+        # Per ora non consideriamo le date contenute
+        # nel testo della notizia, nei documenti o nelle scadenze.
         # ----------------------------------------------------
         # DOCUMENTI / LINK
         # ----------------------------------------------------
