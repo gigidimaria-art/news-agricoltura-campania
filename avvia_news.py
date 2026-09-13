@@ -86,12 +86,14 @@ def salva_pubblicazione_database(pubblicazione, url):
 
         titolo = pubblicazione.get("titolo", "")
         data_pubblicazione = pubblicazione.get("data_pubblicazione") or None
+
+        if data_pubblicazione:
+            data_pubblicazione = datetime.strptime(
+                data_pubblicazione,
+                "%d/%m/%Y"
+            ).date()
+
         testo_pagina = pubblicazione.get("testo_pagina", "")
-
-        documenti = str(
-            pubblicazione.get("documenti", [])
-        )
-
         # ----------------------------------------------------
         # IMPRONTA DEL CONTENUTO
         # ----------------------------------------------------
