@@ -450,6 +450,8 @@ def testa_pagina_individuale():
                 f"→ {documento['url']}"
             )
 
+        salva_pubblicazione_database(dati, prima["url"])
+    
     print("============================================")
 
 
