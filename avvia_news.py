@@ -128,7 +128,9 @@ def salva_pubblicazione_database(pubblicazione, url):
             ""
         )
 
-        ultimo_aggiornamento = None
+        ultimo_aggiornamento = pubblicazione.get(
+            "ultimo_aggiornamento"
+        ) or None
 
         # ----------------------------------------------------
         # DOCUMENTI
