@@ -181,17 +181,15 @@ def salva_pubblicazione_database(pubblicazione, url):
                     giorno
                 ).date()
 
-        # ----------------------------------------------------
-        # DOCUMENTI
-        # ----------------------------------------------------
+            print(
+                "ULTIMO AGGIORNAMENTO PRIMA DEL DATABASE:",
+                ultimo_aggiornamento
+            )
 
-        documenti = json.dumps(
-            pubblicazione.get(
-                "documenti",
-                []
-            ),
-            ensure_ascii=False
-        )
+            print(
+                "TIPO ULTIMO AGGIORNAMENTO:",
+                type(ultimo_aggiornamento)
+            )
 
         # ----------------------------------------------------
         # CONTROLLO DATA
