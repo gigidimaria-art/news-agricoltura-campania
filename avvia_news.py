@@ -77,6 +77,10 @@ def verifica_database():
 # ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
 # ============================================================
 
+# ============================================================
+# ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
+# ============================================================
+
 def estrai_pubblicazioni_archivio():
     try:
         headers = {
@@ -95,7 +99,6 @@ def estrai_pubblicazioni_archivio():
 
         pubblicazioni = []
 
-        # Cerchiamo tutti i collegamenti presenti nell'archivio
         for link in soup.find_all("a", href=True):
 
             titolo = link.get_text(" ", strip=True)
@@ -105,14 +108,21 @@ def estrai_pubblicazioni_archivio():
 
             url = urljoin(URL_ARCHIVIO, link["href"])
 
-            # Consideriamo solo i collegamenti alle singole pubblicazioni
+            # Consideriamo solo collegamenti nell'area comunicati
             if "/comunicati/" not in url:
                 continue
 
-            # Evitiamo collegamenti tecnici o duplicati
+            # Escludiamo la pagina principale dell'archivio
             if url == URL_ARCHIVIO:
                 continue
 
+            # Escludiamo le pagine degli archivi annuali
+            nome_file = url.rstrip("/").split("/")[-1].lower()
+
+            if nome_file.startswith("comunicati_"):
+                continue
+
+            # Evitiamo duplicati
             if any(p["url"] == url for p in pubblicazioni):
                 continue
 
