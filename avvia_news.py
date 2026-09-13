@@ -249,17 +249,33 @@ def salva_pubblicazione_database(pubblicazione, url):
 
         risultato = cur.fetchone()
 
-        if risultato:
+if risultato:
 
-            impronta_esistente = risultato[0]
+    impronta_esistente = risultato[0]
 
-            if impronta_esistente == impronta:
+    if impronta_esistente == impronta:
 
-                print("ℹ️ Pubblicazione già presente e invariata")
+        print("ℹ️ Pubblicazione già presente e invariata")
 
-            else:
+        cur.execute(
+            """
+            UPDATE pubblicazioni_monitorate
+            SET ultima_verifica = CURRENT_TIMESTAMP
+            WHERE url = %s
+            """,
+            (url,)
+        )
 
-                print("🔄 Pubblicazione già presente ma modificata")
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return
+
+    else:
+
+        print("🔄 Pubblicazione già presente ma modificata")
 
         # ----------------------------------------------------
         # INSERIMENTO NEL DATABASE
