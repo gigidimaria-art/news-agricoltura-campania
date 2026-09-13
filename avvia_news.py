@@ -94,6 +94,10 @@ def salva_pubblicazione_database(pubblicazione, url):
             ).date()
 
         testo_pagina = pubblicazione.get("testo_pagina", "")
+
+        print("DATA PRIMA DEL DATABASE:", data_pubblicazione)
+        print("TIPO DATA:", type(data_pubblicazione))
+        
         # ----------------------------------------------------
         # IMPRONTA DEL CONTENUTO
         # ----------------------------------------------------
