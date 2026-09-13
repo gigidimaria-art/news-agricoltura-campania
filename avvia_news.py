@@ -128,10 +128,46 @@ def salva_pubblicazione_database(pubblicazione, url):
             ""
         )
 
-        ultimo_aggiornamento = pubblicazione.get(
-            "ultimo_aggiornamento"
-        ) or None
+ultimo_aggiornamento = pubblicazione.get(
+    "ultimo_aggiornamento"
+) or None
 
+if ultimo_aggiornamento:
+
+    mesi = {
+        "gennaio": 1,
+        "febbraio": 2,
+        "marzo": 3,
+        "aprile": 4,
+        "maggio": 5,
+        "giugno": 6,
+        "luglio": 7,
+        "agosto": 8,
+        "settembre": 9,
+        "ottobre": 10,
+        "novembre": 11,
+        "dicembre": 12
+    }
+
+    import re
+
+    match_aggiornamento = re.search(
+        r"ultimo aggiornamento\s+(\d{1,2})\s+([a-zà]+)\s+(\d{4})",
+        ultimo_aggiornamento,
+        re.IGNORECASE
+    )
+
+    if match_aggiornamento:
+
+        giorno = int(match_aggiornamento.group(1))
+        mese = mesi[match_aggiornamento.group(2).lower()]
+        anno = int(match_aggiornamento.group(3))
+
+        ultimo_aggiornamento = datetime(
+            anno,
+            mese,
+            giorno
+        ).date()
         # ----------------------------------------------------
         # DOCUMENTI
         # ----------------------------------------------------
