@@ -46,7 +46,41 @@ if not DATABASE_URL:
 else:
     print("✅ DATABASE_URL configurata")
 
+# ============================================================
+# VERIFICA COLLEGAMENTO DATABASE
+# ============================================================
 
+def verifica_database():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM pubblicazioni_monitorate
+        """)
+
+        risultato = cur.fetchone()[0]
+
+        print("✅ Collegamento a Neon riuscito")
+        print(f"✅ Tabella pubblicazioni_monitorate presente")
+        print(f"✅ Pubblicazioni attualmente nel database: {risultato}")
+
+        cur.close()
+        conn.close()
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Errore collegamento database: {e}")
+        return False
+
+
+# ============================================================
+# AVVIO
+# ============================================================
+
+verifica_database()
 print(f"✅ Progetto: {NOME_PROGETTO}")
 print(f"✅ Fonte ufficiale: {URL_HOME}")
 print(f"✅ Archivio: {URL_ARCHIVIO}")
