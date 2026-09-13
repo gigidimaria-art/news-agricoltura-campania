@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from datetime import datetime
 import json
 
+
 # ============================================================
 # CONFIGURAZIONE GENERALE
 # ============================================================
@@ -24,6 +25,7 @@ URL_ARCHIVIO = (
 USER_AGENT = "Mozilla/5.0 News-Agricoltura-Campania"
 
 INTERVALLO_CONTROLLO = 60
+
 
 # ============================================================
 # VARIABILI D'AMBIENTE
@@ -45,12 +47,15 @@ if not DATABASE_URL:
 else:
     print("✅ DATABASE_URL configurata")
 
+
 # ============================================================
 # VERIFICA COLLEGAMENTO DATABASE
 # ============================================================
 
 def verifica_database():
+
     try:
+
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
 
@@ -62,8 +67,11 @@ def verifica_database():
         risultato = cur.fetchone()[0]
 
         print("✅ Collegamento a Neon riuscito")
-        print(f"✅ Tabella pubblicazioni_monitorate presente")
-        print(f"✅ Pubblicazioni attualmente nel database: {risultato}")
+        print("✅ Tabella pubblicazioni_monitorate presente")
+        print(
+            f"✅ Pubblicazioni attualmente nel database: "
+            f"{risultato}"
+        )
 
         cur.close()
         conn.close()
@@ -71,8 +79,13 @@ def verifica_database():
         return True
 
     except Exception as e:
-        print(f"❌ Errore collegamento database: {e}")
+
+        print(
+            f"❌ Errore collegamento database: {e}"
+        )
+
         return False
+
 
 # ============================================================
 # SALVATAGGIO DI UNA PUBBLICAZIONE NEL DATABASE
@@ -81,97 +94,66 @@ def verifica_database():
 def salva_pubblicazione_database(pubblicazione, url):
 
     try:
+
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
 
-        titolo = pubblicazione.get("titolo", "")
-        data_pubblicazione = pubblicazione.get("data_pubblicazione") or None
+        # ----------------------------------------------------
+        # DATI PRINCIPALI
+        # ----------------------------------------------------
+
+        titolo = pubblicazione.get(
+            "titolo",
+            ""
+        )
+
+        data_pubblicazione = pubblicazione.get(
+            "data_pubblicazione"
+        ) or None
+
+        # ----------------------------------------------------
+        # CONVERSIONE DATA
+        # Da DD/MM/YYYY a oggetto date Python
+        # ----------------------------------------------------
 
         if data_pubblicazione:
+
             data_pubblicazione = datetime.strptime(
                 data_pubblicazione,
                 "%d/%m/%Y"
             ).date()
 
-        testo_pagina = pubblicazione.get("testo_pagina", "")
-
-        print("DATA PRIMA DEL DATABASE:", data_pubblicazione)
-        print("TIPO DATA:", type(data_pubblicazione))
-        
-        # ----------------------------------------------------
-        # IMPRONTA DEL CONTENUTO
-        # ----------------------------------------------------
-
-        contenuto = (
-            titolo
-            + "|"
-            + str(data_pubblicazione)
-            + "|"
-            + testo_pagina
-            + "|"
-            + documenti
+        testo_pagina = pubblicazione.get(
+            "testo_pagina",
+            ""
         )
 
-        impronta = hashlib.sha256(
-            contenuto.encode("utf-8")
-        ).hexdigest()
-
-        # ----------------------------------------------------
-        # INSERIMENTO
-        # ----------------------------------------------------
-
-        cur.execute(
-            """
-            INSERT INTO pubblicazioni_monitorate
-            (
-                titolo,
-                data_pubblicazione,
-                url,
-                testo_pagina,
-                documenti,
-                impronta
-            )
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (url) DO NOTHING
-            """,
-            (
-                titolo,
-                data_pubblicazione,
-                url,
-                testo_pagina,
-                documenti,
-                impronta
-            )
-        )
-
-        conn.commit()
-
-        cur.close()
-        conn.close()
-
-        print("✅ Pubblicazione salvata nel database")
-
-    except Exception as e:
-
-        print(f"❌ Errore nel salvataggio nel database: {e}")
-
-# ============================================================
-# SALVATAGGIO DI UNA PUBBLICAZIONE NEL DATABASE
-# ============================================================
-
-def salva_pubblicazione_database(pubblicazione, url):
-
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-
-        titolo = pubblicazione.get("titolo", "")
-        data_pubblicazione = pubblicazione.get("data_pubblicazione") or None
-        testo_pagina = pubblicazione.get("testo_pagina", "")
         ultimo_aggiornamento = None
+
+        # ----------------------------------------------------
+        # DOCUMENTI
+        # ----------------------------------------------------
+
         documenti = json.dumps(
-            pubblicazione.get("documenti", []),
+            pubblicazione.get(
+                "documenti",
+                []
+            ),
             ensure_ascii=False
+        )
+
+        # ----------------------------------------------------
+        # CONTROLLO DATA
+        # ----------------------------------------------------
+
+        print(
+            "DATA PRIMA DEL DATABASE:",
+            data_pubblicazione
+        )
+
+        print(
+            "TIPO DATA:",
+            type(data_pubblicazione)
         )
 
         # ----------------------------------------------------
@@ -195,7 +177,7 @@ def salva_pubblicazione_database(pubblicazione, url):
         ).hexdigest()
 
         # ----------------------------------------------------
-        # INSERIMENTO
+        # INSERIMENTO NEL DATABASE
         # ----------------------------------------------------
 
         cur.execute(
@@ -227,22 +209,25 @@ def salva_pubblicazione_database(pubblicazione, url):
         cur.close()
         conn.close()
 
-        print("✅ Pubblicazione salvata nel database")
+        print(
+            "✅ Pubblicazione salvata nel database"
+        )
 
     except Exception as e:
 
-        print(f"❌ Errore nel salvataggio nel database: {e}")
+        print(
+            f"❌ Errore nel salvataggio nel database: {e}"
+        )
 
-# ============================================================
-# ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
-# ============================================================
 
 # ============================================================
 # ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
 # ============================================================
 
 def estrai_pubblicazioni_archivio():
+
     try:
+
         headers = {
             "User-Agent": USER_AGENT
         }
@@ -255,56 +240,116 @@ def estrai_pubblicazioni_archivio():
 
         response.raise_for_status()
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
 
         pubblicazioni = []
 
-        for link in soup.find_all("a", href=True):
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
 
-            titolo = link.get_text(" ", strip=True)
+            titolo = link.get_text(
+                " ",
+                strip=True
+            )
 
             if not titolo:
                 continue
 
-            url = urljoin(URL_ARCHIVIO, link["href"])
+            url = urljoin(
+                URL_ARCHIVIO,
+                link["href"]
+            )
 
-            # Consideriamo solo collegamenti nell'area comunicati
+            # ------------------------------------------------
+            # SOLO COLLEGAMENTI NELL'AREA COMUNICATI
+            # ------------------------------------------------
+
             if "/comunicati/" not in url:
                 continue
 
-            # Escludiamo la pagina principale dell'archivio
+            # ------------------------------------------------
+            # ESCLUDIAMO LA PAGINA PRINCIPALE
+            # ------------------------------------------------
+
             if url == URL_ARCHIVIO:
                 continue
 
-            # Escludiamo le pagine degli archivi annuali
-            nome_file = url.rstrip("/").split("/")[-1].lower()
+            # ------------------------------------------------
+            # ESCLUDIAMO GLI ARCHIVI ANNUALI
+            # ------------------------------------------------
 
-            if nome_file.startswith("comunicati_"):
+            nome_file = (
+                url.rstrip("/")
+                .split("/")[-1]
+                .lower()
+            )
+
+            if nome_file.startswith(
+                "comunicati_"
+            ):
                 continue
 
-            # Evitiamo duplicati
-            if any(p["url"] == url for p in pubblicazioni):
+            # ------------------------------------------------
+            # EVITIAMO DUPLICATI
+            # ------------------------------------------------
+
+            if any(
+                p["url"] == url
+                for p in pubblicazioni
+            ):
                 continue
 
-            pubblicazioni.append({
-                "titolo": titolo,
-                "url": url
-            })
+            pubblicazioni.append(
+                {
+                    "titolo": titolo,
+                    "url": url
+                }
+            )
 
-        print("============================================")
-        print("📋 ESTRAZIONE ARCHIVIO")
-        print(f"✅ Pubblicazioni individuate: {len(pubblicazioni)}")
+        print(
+            "============================================"
+        )
 
-        for i, pubblicazione in enumerate(pubblicazioni, start=1):
-            print(f"{i}. {pubblicazione['titolo']}")
-            print(f"   {pubblicazione['url']}")
+        print(
+            "📋 ESTRAZIONE ARCHIVIO"
+        )
 
-        print("============================================")
+        print(
+            f"✅ Pubblicazioni individuate: "
+            f"{len(pubblicazioni)}"
+        )
+
+        for i, pubblicazione in enumerate(
+            pubblicazioni,
+            start=1
+        ):
+
+            print(
+                f"{i}. "
+                f"{pubblicazione['titolo']}"
+            )
+
+            print(
+                f"   {pubblicazione['url']}"
+            )
+
+        print(
+            "============================================"
+        )
 
         return pubblicazioni
 
     except Exception as e:
-        print(f"❌ Errore estrazione archivio: {e}")
+
+        print(
+            f"❌ Errore estrazione archivio: {e}"
+        )
+
         return []
 
 
@@ -314,12 +359,15 @@ def estrai_pubblicazioni_archivio():
 
 estrai_pubblicazioni_archivio()
 
+
 # ============================================================
 # LETTURA PAGINA INDIVIDUALE DELLA PUBBLICAZIONE
 # ============================================================
 
 def estrai_dati_pubblicazione(url):
+
     try:
+
         headers = {
             "User-Agent": USER_AGENT
         }
@@ -332,7 +380,10 @@ def estrai_dati_pubblicazione(url):
 
         response.raise_for_status()
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
 
         # ----------------------------------------------------
         # TITOLO
@@ -340,13 +391,23 @@ def estrai_dati_pubblicazione(url):
 
         h1 = soup.find("h1")
 
-        titolo = h1.get_text(" ", strip=True) if h1 else ""
+        titolo = (
+            h1.get_text(
+                " ",
+                strip=True
+            )
+            if h1
+            else ""
+        )
 
         # ----------------------------------------------------
         # TESTO COMPLETO DELLA PAGINA
         # ----------------------------------------------------
 
-        testo_pagina = soup.get_text(" ", strip=True)
+        testo_pagina = soup.get_text(
+            " ",
+            strip=True
+        )
 
         # ----------------------------------------------------
         # DATA DI PUBBLICAZIONE
@@ -363,7 +424,10 @@ def estrai_dati_pubblicazione(url):
         )
 
         if match_data:
-            data_pubblicazione = match_data.group(1)
+
+            data_pubblicazione = (
+                match_data.group(1)
+            )
 
         # ----------------------------------------------------
         # DOCUMENTI / LINK
@@ -371,16 +435,37 @@ def estrai_dati_pubblicazione(url):
 
         documenti = []
 
-        for link in soup.find_all("a", href=True):
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
 
-            href = urljoin(url, link["href"])
-            testo_link = link.get_text(" ", strip=True)
+            href = urljoin(
+                url,
+                link["href"]
+            )
 
-            if href.lower().endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx")):
-                documenti.append({
-                    "titolo": testo_link,
-                    "url": href
-                })
+            testo_link = link.get_text(
+                " ",
+                strip=True
+            )
+
+            if href.lower().endswith(
+                (
+                    ".pdf",
+                    ".doc",
+                    ".docx",
+                    ".xls",
+                    ".xlsx"
+                )
+            ):
+
+                documenti.append(
+                    {
+                        "titolo": testo_link,
+                        "url": href
+                    }
+                )
 
         # ----------------------------------------------------
         # DATA ULTIMO AGGIORNAMENTO
@@ -388,12 +473,23 @@ def estrai_dati_pubblicazione(url):
 
         ultimo_aggiornamento = ""
 
-        for elemento in soup.find_all(string=True):
+        for elemento in soup.find_all(
+            string=True
+        ):
+
             testo = elemento.strip().lower()
 
             if "ultimo aggiornamento" in testo:
-                ultimo_aggiornamento = elemento.strip()
+
+                ultimo_aggiornamento = (
+                    elemento.strip()
+                )
+
                 break
+
+        # ----------------------------------------------------
+        # RISULTATO
+        # ----------------------------------------------------
 
         return {
             "titolo": titolo,
@@ -405,7 +501,9 @@ def estrai_dati_pubblicazione(url):
 
     except Exception as e:
 
-        print(f"❌ Errore nella pagina {url}: {e}")
+        print(
+            f"❌ Errore nella pagina {url}: {e}"
+        )
 
         return None
 
@@ -416,59 +514,120 @@ def estrai_dati_pubblicazione(url):
 
 def testa_pagina_individuale():
 
-    pubblicazioni = estrai_pubblicazioni_archivio()
+    pubblicazioni = (
+        estrai_pubblicazioni_archivio()
+    )
 
     if not pubblicazioni:
-        print("❌ Nessuna pubblicazione disponibile")
+
+        print(
+            "❌ Nessuna pubblicazione disponibile"
+        )
+
         return
 
-    # Per il primo test utilizziamo soltanto la prima pubblicazione
+    # --------------------------------------------------------
+    # PRIMO TEST
+    # --------------------------------------------------------
+
     prima = pubblicazioni[0]
 
-    print("============================================")
-    print("🔎 TEST PAGINA INDIVIDUALE")
-    print(f"Titolo archivio: {prima['titolo']}")
-    print(f"URL: {prima['url']}")
+    print(
+        "============================================"
+    )
 
-    dati = estrai_dati_pubblicazione(prima["url"])
+    print(
+        "🔎 TEST PAGINA INDIVIDUALE"
+    )
+
+    print(
+        f"Titolo archivio: "
+        f"{prima['titolo']}"
+    )
+
+    print(
+        f"URL: {prima['url']}"
+    )
+
+    dati = estrai_dati_pubblicazione(
+        prima["url"]
+    )
 
     if dati:
 
-        print("--------------------------------------------")
-        print(f"Titolo pagina: {dati['titolo']}")
-        print(f"Data pubblicazione: {dati['data_pubblicazione']}")
+        print(
+            "--------------------------------------------"
+        )
+
+        print(
+            f"Titolo pagina: "
+            f"{dati['titolo']}"
+        )
+
+        print(
+            f"Data pubblicazione: "
+            f"{dati['data_pubblicazione']}"
+        )
+
         print(
             f"Testo pagina: "
             f"{len(dati['testo_pagina'])} caratteri"
         )
+
         print(
             f"Documenti trovati: "
             f"{len(dati['documenti'])}"
         )
+
         print(
             f"Ultimo aggiornamento: "
             f"{dati['ultimo_aggiornamento']}"
         )
 
         for documento in dati["documenti"]:
+
             print(
-                f"Documento: {documento['titolo']} "
+                f"Documento: "
+                f"{documento['titolo']} "
                 f"→ {documento['url']}"
             )
 
-        salva_pubblicazione_database(dati, prima["url"])
-    
-    print("============================================")
+        salva_pubblicazione_database(
+            dati,
+            prima["url"]
+        )
 
+    print(
+        "============================================"
+    )
+
+
+# ============================================================
+# ESECUZIONE TEST
+# ============================================================
 
 testa_pagina_individuale()
+
 
 # ============================================================
 # AVVIO
 # ============================================================
 
 verifica_database()
-print(f"✅ Progetto: {NOME_PROGETTO}")
-print(f"✅ Fonte ufficiale: {URL_HOME}")
-print(f"✅ Archivio: {URL_ARCHIVIO}")
-print(f"✅ Intervallo controllo: {INTERVALLO_CONTROLLO} secondi")
+
+print(
+    f"✅ Progetto: {NOME_PROGETTO}"
+)
+
+print(
+    f"✅ Fonte ufficiale: {URL_HOME}"
+)
+
+print(
+    f"✅ Archivio: {URL_ARCHIVIO}"
+)
+
+print(
+    f"✅ Intervallo controllo: "
+    f"{INTERVALLO_CONTROLLO} secondi"
+)
