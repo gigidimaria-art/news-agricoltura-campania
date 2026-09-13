@@ -145,6 +145,150 @@ def estrai_pubblicazioni_archivio():
 estrai_pubblicazioni_archivio()
 
 # ============================================================
+# LETTURA PAGINA INDIVIDUALE DELLA PUBBLICAZIONE
+# ============================================================
+
+def estrai_dati_pubblicazione(url):
+    try:
+        headers = {
+            "User-Agent": USER_AGENT
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # ----------------------------------------------------
+        # TITOLO
+        # ----------------------------------------------------
+
+        h1 = soup.find("h1")
+
+        titolo = h1.get_text(" ", strip=True) if h1 else ""
+
+        # ----------------------------------------------------
+        # TESTO COMPLETO DELLA PAGINA
+        # ----------------------------------------------------
+
+        testo_pagina = soup.get_text(" ", strip=True)
+
+        # ----------------------------------------------------
+        # DATA DI PUBBLICAZIONE
+        # ----------------------------------------------------
+
+        data_pubblicazione = ""
+
+        for elemento in soup.find_all(string=True):
+            testo = elemento.strip()
+
+            if "/" in testo and len(testo) <= 30:
+                if any(c.isdigit() for c in testo):
+                    data_pubblicazione = testo
+                    break
+
+        # ----------------------------------------------------
+        # DOCUMENTI / LINK
+        # ----------------------------------------------------
+
+        documenti = []
+
+        for link in soup.find_all("a", href=True):
+
+            href = urljoin(url, link["href"])
+            testo_link = link.get_text(" ", strip=True)
+
+            if href.lower().endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx")):
+                documenti.append({
+                    "titolo": testo_link,
+                    "url": href
+                })
+
+        # ----------------------------------------------------
+        # DATA ULTIMO AGGIORNAMENTO
+        # ----------------------------------------------------
+
+        ultimo_aggiornamento = ""
+
+        for elemento in soup.find_all(string=True):
+            testo = elemento.strip().lower()
+
+            if "ultimo aggiornamento" in testo:
+                ultimo_aggiornamento = elemento.strip()
+                break
+
+        return {
+            "titolo": titolo,
+            "data_pubblicazione": data_pubblicazione,
+            "testo_pagina": testo_pagina,
+            "ultimo_aggiornamento": ultimo_aggiornamento,
+            "documenti": documenti
+        }
+
+    except Exception as e:
+
+        print(f"❌ Errore nella pagina {url}: {e}")
+
+        return None
+
+
+# ============================================================
+# TEST LETTURA PAGINA INDIVIDUALE
+# ============================================================
+
+def testa_pagina_individuale():
+
+    pubblicazioni = estrai_pubblicazioni_archivio()
+
+    if not pubblicazioni:
+        print("❌ Nessuna pubblicazione disponibile")
+        return
+
+    # Per il primo test utilizziamo soltanto la prima pubblicazione
+    prima = pubblicazioni[0]
+
+    print("============================================")
+    print("🔎 TEST PAGINA INDIVIDUALE")
+    print(f"Titolo archivio: {prima['titolo']}")
+    print(f"URL: {prima['url']}")
+
+    dati = estrai_dati_pubblicazione(prima["url"])
+
+    if dati:
+
+        print("--------------------------------------------")
+        print(f"Titolo pagina: {dati['titolo']}")
+        print(f"Data pubblicazione: {dati['data_pubblicazione']}")
+        print(
+            f"Testo pagina: "
+            f"{len(dati['testo_pagina'])} caratteri"
+        )
+        print(
+            f"Documenti trovati: "
+            f"{len(dati['documenti'])}"
+        )
+        print(
+            f"Ultimo aggiornamento: "
+            f"{dati['ultimo_aggiornamento']}"
+        )
+
+        for documento in dati["documenti"]:
+            print(
+                f"Documento: {documento['titolo']} "
+                f"→ {documento['url']}"
+            )
+
+    print("============================================")
+
+
+testa_pagina_individuale()
+
+# ============================================================
 # AVVIO
 # ============================================================
 
