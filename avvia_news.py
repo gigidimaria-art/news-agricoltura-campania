@@ -2,10 +2,14 @@ import os
 import re
 import json
 import hashlib
+import smtplib
+import threading
+import time
 import requests
 import psycopg2
 
 from datetime import datetime
+from email.message import EmailMessage
 from urllib.parse import urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify
@@ -18,6 +22,14 @@ from flask import Flask, jsonify
 URL_ARCHIVIO = "https://agricoltura.regione.campania.it/comunicati/comunicati.htm"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 USER_AGENT = "Mozilla/5.0 News-Agricoltura-Campania"
+
+# Gmail SMTP.
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+INTERVALLO_MINUTI = int(os.environ.get("INTERVALLO_MINUTI", "60"))
+EMAIL_MITTENTE = os.environ.get("EMAIL_MITTENTE")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINATARIO")
 
 CATEGORIE_ARCHIVIO = (
     "Comunicati Stampa",
@@ -52,7 +64,6 @@ def connetti_database():
 
 
 def prepara_database():
-    """Crea la tabella se necessario e aggiunge testo_archivio senza perdere dati."""
     conn = connetti_database()
     cur = conn.cursor()
 
@@ -75,12 +86,23 @@ def prepara_database():
             )
             """
         )
+
         cur.execute(
             """
             ALTER TABLE pubblicazioni_monitorate
             ADD COLUMN IF NOT EXISTS testo_archivio TEXT
             """
         )
+
+        # Contiene l'impronta dell'ultima versione per la quale l'email
+        # di notifica è stata inviata con successo.
+        cur.execute(
+            """
+            ALTER TABLE pubblicazioni_monitorate
+            ADD COLUMN IF NOT EXISTS impronta_notificata TEXT
+            """
+        )
+
         conn.commit()
     except Exception:
         conn.rollback()
@@ -90,15 +112,74 @@ def prepara_database():
         conn.close()
 
 
+def database_ha_gia_dati():
+    conn = connetti_database()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT EXISTS (SELECT 1 FROM pubblicazioni_monitorate)")
+        return bool(cur.fetchone()[0])
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ============================================================
+# EMAIL
+# ============================================================
+
+def configurazione_email_completa():
+    mancanti = []
+    if not EMAIL_MITTENTE:
+        mancanti.append("EMAIL_MITTENTE")
+    if not EMAIL_PASSWORD:
+        mancanti.append("EMAIL_PASSWORD")
+    if not EMAIL_DESTINATARIO:
+        mancanti.append("EMAIL_DESTINATARIO")
+    return mancanti
+
+
+def invia_email_notifica(pubblicazione, tipo):
+    mancanti = configurazione_email_completa()
+    if mancanti:
+        raise RuntimeError(
+            "Configurazione email incompleta. Variabili mancanti: "
+            + ", ".join(mancanti)
+        )
+
+    if tipo == "nuova":
+        oggetto = f"[News Agricoltura Campania] Nuova pubblicazione: {pubblicazione['titolo']}"
+        intestazione = "È stata rilevata una nuova pubblicazione."
+    else:
+        oggetto = f"[News Agricoltura Campania] Pubblicazione aggiornata: {pubblicazione['titolo']}"
+        intestazione = "È stata rilevata una modifica a una pubblicazione già monitorata."
+
+    corpo = (
+        f"{intestazione}\n\n"
+        f"Titolo: {pubblicazione['titolo']}\n"
+        f"Categoria: {pubblicazione['categoria']}\n"
+        f"Data pubblicazione: {pubblicazione['data_pubblicazione'] or 'non rilevata'}\n"
+        f"Ultimo aggiornamento: {pubblicazione['ultimo_aggiornamento'] or 'non rilevato'}\n\n"
+        f"Testo nell'archivio:\n{pubblicazione['testo_archivio']}\n\n"
+        f"Pagina ufficiale:\n{pubblicazione['url']}\n\n"
+        f"Fonte:\n{URL_ARCHIVIO}\n"
+    )
+
+    messaggio = EmailMessage()
+    messaggio["Subject"] = oggetto
+    messaggio["From"] = EMAIL_MITTENTE
+    messaggio["To"] = EMAIL_DESTINATARIO
+    messaggio.set_content(corpo)
+
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+        server.login(EMAIL_MITTENTE, EMAIL_PASSWORD)
+        server.send_message(messaggio)
+
+
 # ============================================================
 # ESTRAZIONE ARCHIVIO
 # ============================================================
 
 def analizza_link_archivio(link):
-    """
-    Riconosce esclusivamente i link che nell'archivio hanno il formato:
-    Giorno + mese + categoria + testo della pubblicazione.
-    """
     testo = " ".join(link.get_text(" ", strip=True).split())
     if not testo:
         return None
@@ -118,7 +199,13 @@ def analizza_link_archivio(link):
     giorno = int(match.group("giorno"))
     mese_nome = match.group("mese").lower()
     mese = MESI_ARCHIVIO.get(mese_nome)
-    if not mese or not 1 <= giorno <= 31:
+
+    if not mese:
+        return None
+
+    try:
+        datetime(2000, mese, giorno)
+    except ValueError:
         return None
 
     categoria = match.group("categoria")
@@ -137,7 +224,7 @@ def analizza_link_archivio(link):
 def estrai_pubblicazioni_archivio():
     response = requests.get(
         URL_ARCHIVIO,
-        timeout=15,
+        timeout=20,
         headers={"User-Agent": USER_AGENT},
     )
     response.raise_for_status()
@@ -155,23 +242,17 @@ def estrai_pubblicazioni_archivio():
 
         if parsed.scheme not in ("http", "https"):
             continue
-
         if parsed.netloc.lower() != "agricoltura.regione.campania.it":
             continue
 
-        # Il frammento (#...) identifica una posizione interna della pagina,
-        # non una pubblicazione diversa. Lo eliminiamo per avere un URL
-        # canonico e non creare duplicati nel database.
+        # Il frammento (#...) non identifica una pagina diversa.
         url_pubblicazione = urlunparse(parsed._replace(fragment=""))
 
-        # Una stessa pagina può comparire più volte nell'archivio, anche con
-        # la stessa data, ma con testi archivio diversi (per esempio una
-        # pagina contenitore che raccoglie più avvisi). Non eliminiamo quindi
-        # le occorrenze: le raccogliamo tutte e le ordiniamo in modo stabile.
         voce = risultati_per_url.setdefault(
             url_pubblicazione,
             {"url": url_pubblicazione, "voci_archivio": []},
         )
+
         voce_archivio = {
             "categoria": dati_archivio["categoria"],
             "testo": dati_archivio["testo_archivio"],
@@ -185,9 +266,15 @@ def estrai_pubblicazioni_archivio():
     for voce in risultati_per_url.values():
         voci = sorted(
             voce["voci_archivio"],
-            key=lambda item: (item["data"][0], item["data"][1], item["categoria"], item["testo"]),
+            key=lambda item: (
+                item["data"][0],
+                item["data"][1],
+                item["categoria"],
+                item["testo"],
+            ),
             reverse=True,
         )
+
         categorie = []
         testi = []
         for item in voci:
@@ -214,18 +301,11 @@ def estrai_pubblicazioni_archivio():
 # ============================================================
 
 def estrai_data_pubblicazione(testo):
-    """Cerca prima la data associata all'inizio della pubblicazione."""
-    match = re.search(
-        r"\b(\d{2}/\d{2}/\d{4})\s*-\s*",
-        testo,
-    )
+    match = re.search(r"\b(\d{2}/\d{2}/\d{4})\s*-\s*", testo)
     if match:
         return datetime.strptime(match.group(1), "%d/%m/%Y").date()
 
-    match = re.search(
-        r"\b(\d{2}/\d{2}/\d{2})\s*-\s*",
-        testo,
-    )
+    match = re.search(r"\b(\d{2}/\d{2}/\d{2})\s*-\s*", testo)
     if match:
         return datetime.strptime(match.group(1), "%d/%m/%y").date()
 
@@ -257,14 +337,7 @@ def estrai_ultimo_aggiornamento(testo):
 
 
 def estrai_documenti(soup, url_base):
-    estensioni = (
-        ".pdf",
-        ".doc",
-        ".docx",
-        ".xls",
-        ".xlsx",
-        ".zip",
-    )
+    estensioni = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip")
 
     documenti = []
     visti = set()
@@ -276,7 +349,6 @@ def estrai_documenti(soup, url_base):
 
         if not percorso.endswith(estensioni):
             continue
-
         if url_documento in visti:
             continue
 
@@ -312,7 +384,7 @@ def estrai_pubblicazione(dato_archivio):
 
     response = requests.get(
         url,
-        timeout=15,
+        timeout=20,
         headers={"User-Agent": USER_AGENT},
     )
     response.raise_for_status()
@@ -368,10 +440,10 @@ def calcola_impronta(pubblicazione):
 
 
 # ============================================================
-# SALVATAGGIO E CONFRONTO
+# SALVATAGGIO, CONFRONTO E NOTIFICA
 # ============================================================
 
-def salva_pubblicazione(pubblicazione):
+def salva_pubblicazione(pubblicazione, invia_notifica=True):
     impronta = calcola_impronta(pubblicazione)
     pubblicazione["impronta"] = impronta
 
@@ -381,22 +453,22 @@ def salva_pubblicazione(pubblicazione):
     try:
         cur.execute(
             """
-            SELECT id, impronta
+            SELECT id, impronta, impronta_notificata
             FROM pubblicazioni_monitorate
             WHERE url = %s
             """,
             (pubblicazione["url"],),
         )
-
         riga = cur.fetchone()
 
         documenti_json = json.dumps(
             pubblicazione["documenti"],
             ensure_ascii=False,
+            sort_keys=True,
         )
 
         if riga:
-            id_record, impronta_database = riga
+            id_record, impronta_database, impronta_notificata = riga
 
             if impronta_database == impronta:
                 cur.execute(
@@ -407,7 +479,8 @@ def salva_pubblicazione(pubblicazione):
                     """,
                     (id_record,),
                 )
-                print("ℹ️ Pubblicazione già presente e invariata")
+                conn.commit()
+                stato = "invariata"
             else:
                 cur.execute(
                     """
@@ -437,40 +510,96 @@ def salva_pubblicazione(pubblicazione):
                         id_record,
                     ),
                 )
+                conn.commit()
+                stato = "modificata"
+
+            if invia_notifica and EMAIL_MITTENTE and EMAIL_PASSWORD and EMAIL_DESTINATARIO:
+                if impronta_notificata != impronta:
+                    tipo_notifica = "nuova" if impronta_notificata is None else "modificata"
+                    invia_email_notifica(pubblicazione, tipo_notifica)
+                    cur.execute(
+                        """
+                        UPDATE pubblicazioni_monitorate
+                        SET impronta_notificata = %s
+                        WHERE id = %s
+                        """,
+                        (impronta, id_record),
+                    )
+                    conn.commit()
+                    print("✉️ Email di notifica inviata")
+
+            if stato == "invariata":
+                print("ℹ️ Pubblicazione già presente e invariata")
+            else:
                 print("🔄 Pubblicazione modificata e aggiornata")
-        else:
+
+            return stato
+
+        # Nuova URL.
+        # Se il database era già popolato, la nuova pubblicazione è una vera
+        # novità e viene notificata. Se il database è vuoto, la prima esecuzione
+        # costruisce la base iniziale senza inviare centinaia di email.
+        cur.execute(
+            """
+            INSERT INTO pubblicazioni_monitorate (
+                titolo,
+                data_pubblicazione,
+                categoria,
+                url,
+                descrizione,
+                testo_archivio,
+                testo_pagina,
+                ultimo_aggiornamento,
+                documenti,
+                impronta,
+                impronta_notificata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                pubblicazione["titolo"],
+                pubblicazione["data_pubblicazione"],
+                pubblicazione["categoria"],
+                pubblicazione["url"],
+                pubblicazione["descrizione"],
+                pubblicazione["testo_archivio"],
+                pubblicazione["testo_pagina"],
+                pubblicazione["ultimo_aggiornamento"],
+                documenti_json,
+                impronta,
+                None,
+            ),
+        )
+        conn.commit()
+
+        stato = "nuova"
+
+        if invia_notifica:
+            invia_email_notifica(pubblicazione, "nuova")
             cur.execute(
                 """
-                INSERT INTO pubblicazioni_monitorate (
-                    titolo,
-                    data_pubblicazione,
-                    categoria,
-                    url,
-                    descrizione,
-                    testo_archivio,
-                    testo_pagina,
-                    ultimo_aggiornamento,
-                    documenti,
-                    impronta
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                UPDATE pubblicazioni_monitorate
+                SET impronta_notificata = %s
+                WHERE url = %s
                 """,
-                (
-                    pubblicazione["titolo"],
-                    pubblicazione["data_pubblicazione"],
-                    pubblicazione["categoria"],
-                    pubblicazione["url"],
-                    pubblicazione["descrizione"],
-                    pubblicazione["testo_archivio"],
-                    pubblicazione["testo_pagina"],
-                    pubblicazione["ultimo_aggiornamento"],
-                    documenti_json,
-                    impronta,
-                ),
+                (impronta, pubblicazione["url"]),
             )
-            print("🆕 Nuova pubblicazione inserita")
+            conn.commit()
+            print("✉️ Email di notifica inviata")
+        else:
+            # Prima costruzione della base: niente email.
+            cur.execute(
+                """
+                UPDATE pubblicazioni_monitorate
+                SET impronta_notificata = %s
+                WHERE url = %s
+                """,
+                (impronta, pubblicazione["url"]),
+            )
+            conn.commit()
 
-        conn.commit()
+        print("🆕 Nuova pubblicazione inserita")
+        return stato
 
     except Exception:
         conn.rollback()
@@ -482,35 +611,84 @@ def salva_pubblicazione(pubblicazione):
 
 
 # ============================================================
-# CICLO DI TEST
+# CICLO DI ELABORAZIONE
 # ============================================================
 
 def testa_pagine_archivio():
     pubblicazioni_archivio = estrai_pubblicazioni_archivio()
-
-    print(
-        f"Pubblicazioni individuate nell'archivio: {len(pubblicazioni_archivio)}"
-    )
+    print(f"Pubblicazioni individuate nell'archivio: {len(pubblicazioni_archivio)}")
 
     risultati = []
     errori = []
 
+    # Se il DB è vuoto, questa esecuzione è la costruzione della base iniziale.
+    # Non inviamo una email per ogni vecchia pubblicazione già presente nel sito.
+    prima_esecuzione = not database_ha_gia_dati()
+
     for dato_archivio in pubblicazioni_archivio:
         try:
             pubblicazione = estrai_pubblicazione(dato_archivio)
-            salva_pubblicazione(pubblicazione)
-            risultati.append(pubblicazione)
-        except Exception as e:
-            errore = {
-                "url": dato_archivio["url"],
-                "errore": str(e),
-            }
-            errori.append(errore)
-            print(
-                f"❌ Errore nella pubblicazione {dato_archivio['url']}: {e}"
+            stato = salva_pubblicazione(
+                pubblicazione,
+                invia_notifica=not prima_esecuzione,
             )
+            risultati.append(
+                {
+                    "url": pubblicazione["url"],
+                    "titolo": pubblicazione["titolo"],
+                    "stato": stato,
+                }
+            )
+        except Exception as e:
+            errore = {"url": dato_archivio["url"], "errore": str(e)}
+            errori.append(errore)
+            print(f"❌ Errore nella pubblicazione {dato_archivio['url']}: {e}")
 
-    return risultati, errori
+    return risultati, errori, prima_esecuzione
+
+
+# ============================================================
+# CICLO AUTOMATICO
+# ============================================================
+
+_monitoraggio_lock = threading.Lock()
+_stato_monitoraggio = {
+    "ultimo_avvio": None,
+    "ultima_fine": None,
+    "ultima_esecuzione": None,
+    "ultimo_errore": None,
+}
+
+def esegui_monitoraggio():
+    if not _monitoraggio_lock.acquire(blocking=False):
+        print("ℹ️ Monitoraggio già in esecuzione")
+        return
+
+    _stato_monitoraggio["ultimo_avvio"] = datetime.now().isoformat()
+    try:
+        risultati, errori, prima_esecuzione = testa_pagine_archivio()
+        _stato_monitoraggio["ultima_esecuzione"] = {
+            "prima_esecuzione": prima_esecuzione,
+            "pubblicazioni_elaborate": len(risultati),
+            "errori": errori,
+        }
+        _stato_monitoraggio["ultimo_errore"] = None if not errori else "Una o più pubblicazioni non sono state elaborate"
+        print(
+            f"✅ Monitoraggio completato: {len(risultati)} elaborate, "
+            f"{len(errori)} errori"
+        )
+    except Exception as e:
+        _stato_monitoraggio["ultima_esecuzione"] = None
+        _stato_monitoraggio["ultimo_errore"] = str(e)
+        print(f"❌ Errore del ciclo di monitoraggio: {e}")
+    finally:
+        _stato_monitoraggio["ultima_fine"] = datetime.now().isoformat()
+        _monitoraggio_lock.release()
+
+def ciclo_automatico():
+    while True:
+        esegui_monitoraggio()
+        time.sleep(max(1, INTERVALLO_MINUTI) * 60)
 
 
 # ============================================================
@@ -527,6 +705,9 @@ def home():
             "progetto": "News Agricoltura Campania",
             "stato": "attivo",
             "fonte": URL_ARCHIVIO,
+            "notifiche": "email Gmail",
+            "intervallo_minuti": INTERVALLO_MINUTI,
+            "monitoraggio": _stato_monitoraggio,
         }
     )
 
@@ -534,20 +715,62 @@ def home():
 @app.route("/test")
 def test():
     prepara_database()
-    risultati, errori = testa_pagine_archivio()
+    risultati, errori, prima_esecuzione = testa_pagine_archivio()
 
     return jsonify(
         {
             "stato": "ok" if not errori else "completato_con_errori",
-            "pubblicazioni_individuate": len(risultati) + len(errori),
+            "prima_esecuzione": prima_esecuzione,
             "pubblicazioni_elaborate": len(risultati),
             "errori": errori,
         }
     )
 
 
+@app.route("/test-email")
+def test_email():
+    mancanti = configurazione_email_completa()
+    if mancanti:
+        return jsonify(
+            {
+                "stato": "errore",
+                "messaggio": "Configurazione email incompleta",
+                "variabili_mancanti": mancanti,
+            }
+        ), 500
+
+    pubblicazione_test = {
+        "titolo": "Test notifiche - News Agricoltura Campania",
+        "categoria": "Test",
+        "data_pubblicazione": datetime.now().date(),
+        "ultimo_aggiornamento": datetime.now().date(),
+        "testo_archivio": "Questo è un messaggio di prova del sistema di notifica.",
+        "url": URL_ARCHIVIO,
+    }
+
+    try:
+        invia_email_notifica(pubblicazione_test, "nuova")
+        return jsonify(
+            {
+                "stato": "ok",
+                "messaggio": "Email di prova inviata correttamente",
+                "destinatario": EMAIL_DESTINATARIO,
+            }
+        )
+    except Exception as e:
+        return jsonify(
+            {
+                "stato": "errore",
+                "messaggio": str(e),
+            }
+        ), 500
+
+
 if __name__ == "__main__":
     prepara_database()
+
+    thread = threading.Thread(target=ciclo_automatico, daemon=True)
+    thread.start()
 
     app.run(
         host="0.0.0.0",
