@@ -512,7 +512,140 @@ def estrai_pubblicazioni_archivio():
 # TEST ESTRAZIONE ARCHIVIO
 # ============================================================
 
-estrai_pubblicazioni_archivio()
+# ============================================================
+# ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
+# ============================================================
+
+def estrai_pubblicazioni_archivio():
+
+    try:
+
+        headers = {
+            "User-Agent": USER_AGENT
+        }
+
+        response = requests.get(
+            URL_ARCHIVIO,
+            headers=headers,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        pubblicazioni = []
+
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
+
+            url = urljoin(
+                URL_ARCHIVIO,
+                link["href"]
+            )
+
+            # ------------------------------------------------
+            # SOLO COLLEGAMENTI NELL'AREA COMUNICATI
+            # ------------------------------------------------
+
+            if "/comunicati/" not in url:
+                continue
+
+            # ------------------------------------------------
+            # ESCLUDIAMO LA PAGINA PRINCIPALE
+            # ------------------------------------------------
+
+            if url.rstrip("/") == URL_ARCHIVIO.rstrip("/"):
+                continue
+
+            # ------------------------------------------------
+            # ESCLUDIAMO GLI ARCHIVI ANNUALI
+            # ------------------------------------------------
+
+            nome_file = (
+                url.rstrip("/")
+                .split("/")[-1]
+                .lower()
+            )
+
+            if nome_file.startswith("comunicati_"):
+                continue
+
+            # ------------------------------------------------
+            # IL TESTO DEL LINK È IL TITOLO DELL'ARCHIVIO
+            # ------------------------------------------------
+
+            titolo = link.get_text(
+                " ",
+                strip=True
+            )
+
+            if not titolo:
+                continue
+
+            # ------------------------------------------------
+            # EVITIAMO DUPLICATI
+            # ------------------------------------------------
+
+            if any(
+                p["url"] == url
+                for p in pubblicazioni
+            ):
+                continue
+
+            pubblicazioni.append(
+                {
+                    "titolo": titolo,
+                    "url": url
+                }
+            )
+
+        print(
+            "============================================"
+        )
+
+        print(
+            "📋 ESTRAZIONE ARCHIVIO"
+        )
+
+        print(
+            f"✅ Pubblicazioni individuate: "
+            f"{len(pubblicazioni)}"
+        )
+
+        for i, pubblicazione in enumerate(
+            pubblicazioni,
+            start=1
+        ):
+
+            print(
+                f"{i}. "
+                f"{pubblicazione['titolo']}"
+            )
+
+            print(
+                f"   {pubblicazione['url']}"
+            )
+
+        print(
+            "============================================"
+        )
+
+        return pubblicazioni
+
+    except Exception as e:
+
+        print(
+            "❌ Errore durante l'estrazione "
+            f"dell'archivio: {e}"
+        )
+
+        return []
 
 
 # ============================================================
