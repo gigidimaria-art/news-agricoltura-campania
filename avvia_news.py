@@ -60,8 +60,9 @@ def connetti_database():
     if not DATABASE_URL:
         raise RuntimeError("Variabile DATABASE_URL non configurata")
 
-    return psycopg2.connect(DATABASE_URL)
-
+    # Evita che una connessione a Neon possa bloccare indefinitamente
+    # il ciclo automatico di monitoraggio.
+    return psycopg2.connect(DATABASE_URL, connect_timeout=20)
 
 def prepara_database():
     conn = connetti_database()
