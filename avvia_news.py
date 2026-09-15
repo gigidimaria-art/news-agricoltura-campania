@@ -293,6 +293,41 @@ def salva_pubblicazione_database(pubblicazione, url):
                     "🔄 Pubblicazione già presente ma modificata"
                 )
 
+                cur.execute(
+                    """
+                    UPDATE pubblicazioni_monitorate
+                    SET
+                        titolo = %s,
+                        data_pubblicazione = %s,
+                        ultimo_aggiornamento = %s,
+                        testo_pagina = %s,
+                        documenti = %s,
+                        impronta = %s,
+                        ultima_verifica = CURRENT_TIMESTAMP
+                    WHERE url = %s
+                    """,
+                    (
+                        titolo,
+                        data_pubblicazione,
+                        ultimo_aggiornamento,
+                        testo_pagina,
+                        documenti,
+                        impronta,
+                        url
+                    )
+                )
+
+                conn.commit()
+
+                cur.close()
+                conn.close()
+
+                print(
+                    "✅ Pubblicazione aggiornata nel database"
+                )
+
+                return
+
         # ----------------------------------------------------
         # INSERIMENTO NEL DATABASE
         # ----------------------------------------------------
