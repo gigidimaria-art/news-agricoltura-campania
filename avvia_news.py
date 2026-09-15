@@ -26,8 +26,7 @@ USER_AGENT = "Mozilla/5.0 News-Agricoltura-Campania"
 # Gmail SMTP.
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-INTERVALLO_MINUTI = max(1, int(os.environ.get("INTERVALLO_MINUTI", "60")))
-CONTROLLO_COMPLETO_ORE = max(1, int(os.environ.get("CONTROLLO_COMPLETO_ORE", "24")))
+INTERVALLO_MINUTI = int(os.environ.get("INTERVALLO_MINUTI", "60"))
 EMAIL_MITTENTE = os.environ.get("EMAIL_MITTENTE")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINATARIO")
@@ -61,7 +60,7 @@ def connetti_database():
     if not DATABASE_URL:
         raise RuntimeError("Variabile DATABASE_URL non configurata")
 
-    return psycopg2.connect(DATABASE_URL, connect_timeout=20)
+    return psycopg2.connect(DATABASE_URL)
 
 
 def prepara_database():
@@ -616,78 +615,17 @@ def salva_pubblicazione(pubblicazione, invia_notifica=True):
 # ============================================================
 
 def testa_pagine_archivio():
-    print("▶️ Avvio estrazione archivio", flush=True)
     pubblicazioni_archivio = estrai_pubblicazioni_archivio()
-    print(
-        f"Pubblicazioni individuate nell'archivio: {len(pubblicazioni_archivio)}",
-        flush=True,
-    )
+    print(f"Pubblicazioni individuate nell'archivio: {len(pubblicazioni_archivio)}")
 
     risultati = []
     errori = []
 
-    # Se il DB è vuoto, questa esecuzione costruisce la base iniziale.
-    # Non inviamo email per le pubblicazioni già presenti nell'archivio.
+    # Se il DB è vuoto, questa esecuzione è la costruzione della base iniziale.
+    # Non inviamo una email per ogni vecchia pubblicazione già presente nel sito.
     prima_esecuzione = not database_ha_gia_dati()
 
-    # Leggiamo una sola volta dal database ciò che serve per decidere se una
-    # pagina individuale deve essere scaricata. In questo modo una pubblicazione
-    # già presente e invariata nell'archivio NON viene riscaricata ogni 60 minuti.
-    conn = connetti_database()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT url, categoria, testo_archivio, impronta, impronta_notificata, ultima_verifica
-            FROM pubblicazioni_monitorate
-            """
-        )
-        record_database = {
-            r[0]: {
-                "categoria": r[1] or "",
-                "testo_archivio": r[2] or "",
-                "impronta": r[3],
-                "impronta_notificata": r[4],
-                "ultima_verifica": r[5],
-            }
-            for r in cur.fetchall()
-        }
-    finally:
-        cur.close()
-        conn.close()
-
     for dato_archivio in pubblicazioni_archivio:
-        url = dato_archivio["url"]
-        record = record_database.get(url)
-
-        # Se URL, categoria e testo dell'archivio sono identici e l'ultima
-        # versione è già stata notificata, evitiamo di scaricare continuamente
-        # la pagina individuale. Tuttavia eseguiamo periodicamente un controllo
-        # completo della pagina, così da intercettare eventuali modifiche che
-        # non vengano riflesse nell'archivio.
-        ultima_verifica = record["ultima_verifica"] if record is not None else None
-        controllo_completo_necessario = (
-            ultima_verifica is None
-            or (datetime.now() - ultima_verifica).total_seconds() >= CONTROLLO_COMPLETO_ORE * 3600
-        )
-
-risultati.append(
-    {
-        "url": url,
-        "titolo": "",
-        "stato": "invariata_archivio",
-    }
-)
-print(
-    f"ℹ️ Invariata nell'archivio, pagina non scaricata: {url}",
-    flush=True,
-)
-continue
-
-        # Nuova pubblicazione oppure modifica rilevata nell'archivio: in questi
-        # casi è necessario scaricare la pagina individuale per ricostruire la
-        # versione completa e calcolare l'impronta.
-        print(f"🔎 Elaborazione pubblicazione: {url}", flush=True)
         try:
             pubblicazione = estrai_pubblicazione(dato_archivio)
             stato = salva_pubblicazione(
@@ -702,9 +640,9 @@ continue
                 }
             )
         except Exception as e:
-            errore = {"url": url, "errore": str(e)}
+            errore = {"url": dato_archivio["url"], "errore": str(e)}
             errori.append(errore)
-            print(f"❌ Errore nella pubblicazione {url}: {e}", flush=True)
+            print(f"❌ Errore nella pubblicazione {dato_archivio['url']}: {e}")
 
     return risultati, errori, prima_esecuzione
 
