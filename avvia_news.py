@@ -2,6 +2,7 @@ import os
 import re
 import json
 import hashlib
+import smtplib
 import threading
 import time
 import requests
@@ -9,10 +10,6 @@ import psycopg2
 
 from datetime import datetime
 from email.message import EmailMessage
-import base64
-
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from urllib.parse import urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify
@@ -26,16 +23,13 @@ URL_ARCHIVIO = "https://agricoltura.regione.campania.it/comunicati/comunicati.ht
 DATABASE_URL = os.environ.get("DATABASE_URL")
 USER_AGENT = "Mozilla/5.0 News-Agricoltura-Campania"
 
-# Gmail API via HTTPS (porta 443).
-# Non usa SMTP: è compatibile con Render Free.
-INTERVALLO_MINUTI = max(1, int(os.environ.get("INTERVALLO_MINUTI", "60")))
-CONTROLLO_COMPLETO_ORE = max(1, int(os.environ.get("CONTROLLO_COMPLETO_ORE", "24")))
+# Gmail SMTP.
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+INTERVALLO_MINUTI = int(os.environ.get("INTERVALLO_MINUTI", "60"))
 EMAIL_MITTENTE = os.environ.get("EMAIL_MITTENTE")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINATARIO")
-GMAIL_CLIENT_ID = os.environ.get("GMAIL_CLIENT_ID")
-GMAIL_CLIENT_SECRET = os.environ.get("GMAIL_CLIENT_SECRET")
-GMAIL_REFRESH_TOKEN = os.environ.get("GMAIL_REFRESH_TOKEN")
-GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
 CATEGORIE_ARCHIVIO = (
     "Comunicati Stampa",
@@ -66,7 +60,7 @@ def connetti_database():
     if not DATABASE_URL:
         raise RuntimeError("Variabile DATABASE_URL non configurata")
 
-    return psycopg2.connect(DATABASE_URL, connect_timeout=20)
+    return psycopg2.connect(DATABASE_URL)
 
 
 def prepara_database():
@@ -137,14 +131,10 @@ def configurazione_email_completa():
     mancanti = []
     if not EMAIL_MITTENTE:
         mancanti.append("EMAIL_MITTENTE")
+    if not EMAIL_PASSWORD:
+        mancanti.append("EMAIL_PASSWORD")
     if not EMAIL_DESTINATARIO:
         mancanti.append("EMAIL_DESTINATARIO")
-    if not GMAIL_CLIENT_ID:
-        mancanti.append("GMAIL_CLIENT_ID")
-    if not GMAIL_CLIENT_SECRET:
-        mancanti.append("GMAIL_CLIENT_SECRET")
-    if not GMAIL_REFRESH_TOKEN:
-        mancanti.append("GMAIL_REFRESH_TOKEN")
     return mancanti
 
 
@@ -152,7 +142,7 @@ def invia_email_notifica(pubblicazione, tipo):
     mancanti = configurazione_email_completa()
     if mancanti:
         raise RuntimeError(
-            "Configurazione Gmail API incompleta. Variabili mancanti: "
+            "Configurazione email incompleta. Variabili mancanti: "
             + ", ".join(mancanti)
         )
 
@@ -180,21 +170,9 @@ def invia_email_notifica(pubblicazione, tipo):
     messaggio["To"] = EMAIL_DESTINATARIO
     messaggio.set_content(corpo)
 
-    credenziali = Credentials(
-        token=None,
-        refresh_token=GMAIL_REFRESH_TOKEN,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=GMAIL_CLIENT_ID,
-        client_secret=GMAIL_CLIENT_SECRET,
-        scopes=[GMAIL_SCOPE],
-    )
-
-    servizio = build("gmail", "v1", credentials=credenziali, cache_discovery=False)
-    raw = base64.urlsafe_b64encode(messaggio.as_bytes()).decode("utf-8")
-    servizio.users().messages().send(
-        userId="me",
-        body={"raw": raw},
-    ).execute()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+        server.login(EMAIL_MITTENTE, EMAIL_PASSWORD)
+        server.send_message(messaggio)
 
 
 # ============================================================
@@ -535,7 +513,7 @@ def salva_pubblicazione(pubblicazione, invia_notifica=True):
                 conn.commit()
                 stato = "modificata"
 
-            if invia_notifica and EMAIL_MITTENTE and EMAIL_DESTINATARIO:
+            if invia_notifica and EMAIL_MITTENTE and EMAIL_PASSWORD and EMAIL_DESTINATARIO:
                 if impronta_notificata != impronta:
                     tipo_notifica = "nuova" if impronta_notificata is None else "modificata"
                     invia_email_notifica(pubblicazione, tipo_notifica)
@@ -637,85 +615,17 @@ def salva_pubblicazione(pubblicazione, invia_notifica=True):
 # ============================================================
 
 def testa_pagine_archivio():
-    print("▶️ Avvio estrazione archivio", flush=True)
     pubblicazioni_archivio = estrai_pubblicazioni_archivio()
-    print(
-        f"Pubblicazioni individuate nell'archivio: {len(pubblicazioni_archivio)}",
-        flush=True,
-    )
+    print(f"Pubblicazioni individuate nell'archivio: {len(pubblicazioni_archivio)}")
 
     risultati = []
     errori = []
 
-    # Se il DB è vuoto, questa esecuzione costruisce la base iniziale.
-    # Non inviamo email per le pubblicazioni già presenti nell'archivio.
+    # Se il DB è vuoto, questa esecuzione è la costruzione della base iniziale.
+    # Non inviamo una email per ogni vecchia pubblicazione già presente nel sito.
     prima_esecuzione = not database_ha_gia_dati()
 
-    # Leggiamo una sola volta dal database ciò che serve per decidere se una
-    # pagina individuale deve essere scaricata. In questo modo una pubblicazione
-    # già presente e invariata nell'archivio NON viene riscaricata ogni 60 minuti.
-    conn = connetti_database()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT url, categoria, testo_archivio, impronta, impronta_notificata, ultima_verifica
-            FROM pubblicazioni_monitorate
-            """
-        )
-        record_database = {
-            r[0]: {
-                "categoria": r[1] or "",
-                "testo_archivio": r[2] or "",
-                "impronta": r[3],
-                "impronta_notificata": r[4],
-                "ultima_verifica": r[5],
-            }
-            for r in cur.fetchall()
-        }
-    finally:
-        cur.close()
-        conn.close()
-
     for dato_archivio in pubblicazioni_archivio:
-        url = dato_archivio["url"]
-        record = record_database.get(url)
-
-        # Se URL, categoria e testo dell'archivio sono identici e l'ultima
-        # versione è già stata notificata, evitiamo di scaricare continuamente
-        # la pagina individuale. Tuttavia eseguiamo periodicamente un controllo
-        # completo della pagina, così da intercettare eventuali modifiche che
-        # non vengano riflesse nell'archivio.
-        ultima_verifica = record["ultima_verifica"] if record is not None else None
-        controllo_completo_necessario = (
-            ultima_verifica is None
-            or (datetime.now() - ultima_verifica).total_seconds() >= CONTROLLO_COMPLETO_ORE * 3600
-        )
-
-        if (
-            record is not None
-            and record["categoria"] == dato_archivio["categoria"]
-            and record["testo_archivio"] == dato_archivio["testo_archivio"]
-            and record["impronta_notificata"] == record["impronta"]
-            and not controllo_completo_necessario
-        ):
-            risultati.append(
-                {
-                    "url": url,
-                    "titolo": "",
-                    "stato": "invariata_archivio",
-                }
-            )
-            print(
-                f"ℹ️ Invariata nell'archivio, pagina non scaricata: {url}",
-                flush=True,
-            )
-            continue
-
-        # Nuova pubblicazione oppure modifica rilevata nell'archivio: in questi
-        # casi è necessario scaricare la pagina individuale per ricostruire la
-        # versione completa e calcolare l'impronta.
-        print(f"🔎 Elaborazione pubblicazione: {url}", flush=True)
         try:
             pubblicazione = estrai_pubblicazione(dato_archivio)
             stato = salva_pubblicazione(
@@ -730,9 +640,9 @@ def testa_pagine_archivio():
                 }
             )
         except Exception as e:
-            errore = {"url": url, "errore": str(e)}
+            errore = {"url": dato_archivio["url"], "errore": str(e)}
             errori.append(errore)
-            print(f"❌ Errore nella pubblicazione {url}: {e}", flush=True)
+            print(f"❌ Errore nella pubblicazione {dato_archivio['url']}: {e}")
 
     return risultati, errori, prima_esecuzione
 
@@ -804,30 +714,17 @@ def home():
 
 @app.route("/test")
 def test():
-    # Evita che un test manuale possa sovrapporsi al ciclo automatico e
-    # provocare doppie elaborazioni o doppie notifiche.
-    if not _monitoraggio_lock.acquire(blocking=False):
-        return jsonify(
-            {
-                "stato": "monitoraggio_in_corso",
-                "messaggio": "Il monitoraggio automatico è già in esecuzione",
-            }
-        ), 409
+    prepara_database()
+    risultati, errori, prima_esecuzione = testa_pagine_archivio()
 
-    try:
-        prepara_database()
-        risultati, errori, prima_esecuzione = testa_pagine_archivio()
-
-        return jsonify(
-            {
-                "stato": "ok" if not errori else "completato_con_errori",
-                "prima_esecuzione": prima_esecuzione,
-                "pubblicazioni_elaborate": len(risultati),
-                "errori": errori,
-            }
-        )
-    finally:
-        _monitoraggio_lock.release()
+    return jsonify(
+        {
+            "stato": "ok" if not errori else "completato_con_errori",
+            "prima_esecuzione": prima_esecuzione,
+            "pubblicazioni_elaborate": len(risultati),
+            "errori": errori,
+        }
+    )
 
 
 @app.route("/test-email")
