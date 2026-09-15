@@ -671,49 +671,18 @@ def testa_pagine_archivio():
             or (datetime.now() - ultima_verifica).total_seconds() >= CONTROLLO_COMPLETO_ORE * 3600
         )
 
-        if (
-            record is not None
-            and record["categoria"] == dato_archivio["categoria"]
-            and record["testo_archivio"] == dato_archivio["testo_archivio"]
-            and record["impronta_notificata"] == record["impronta"]
-            and not controllo_completo_necessario
-        ):
-            try:
-                conn = connetti_database()
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    UPDATE pubblicazioni_monitorate
-                    SET ultima_verifica = CURRENT_TIMESTAMP
-                    WHERE url = %s
-                    """,
-                    (url,),
-                )
-                conn.commit()
-                cur.close()
-                conn.close()
-                risultati.append(
-                    {
-                        "url": url,
-                        "titolo": "",
-                        "stato": "invariata_archivio",
-                    }
-                )
-                print(
-                    f"ℹ️ Invariata nell'archivio, pagina non scaricata: {url}",
-                    flush=True,
-                )
-                continue
-            except Exception as e:
-                try:
-                    conn.rollback()
-                    cur.close()
-                    conn.close()
-                except Exception:
-                    pass
-                errori.append({"url": url, "errore": str(e)})
-                print(f"❌ Errore aggiornamento verifica {url}: {e}", flush=True)
-                continue
+risultati.append(
+    {
+        "url": url,
+        "titolo": "",
+        "stato": "invariata_archivio",
+    }
+)
+print(
+    f"ℹ️ Invariata nell'archivio, pagina non scaricata: {url}",
+    flush=True,
+)
+continue
 
         # Nuova pubblicazione oppure modifica rilevata nell'archivio: in questi
         # casi è necessario scaricare la pagina individuale per ricostruire la
