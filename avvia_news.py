@@ -331,7 +331,7 @@ def salva_pubblicazione_database(pubblicazione, url):
         # ----------------------------------------------------
         # INSERIMENTO NEL DATABASE
         # ----------------------------------------------------
-
+       
         cur.execute(
             """
             INSERT INTO pubblicazioni_monitorate
