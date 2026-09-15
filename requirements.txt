@@ -2,6 +2,3 @@ requests
 beautifulsoup4
 psycopg2-binary
 Flask
-google-api-python-client
-google-auth
-google-auth-httplib2
