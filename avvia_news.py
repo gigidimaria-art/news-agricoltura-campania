@@ -1,778 +1,919 @@
 import os
-import re
-import json
-import hashlib
-import smtplib
-import threading
 import time
+import hashlib
 import requests
 import psycopg2
 
-from datetime import datetime
-from email.message import EmailMessage
-from urllib.parse import urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify
-
+from urllib.parse import urljoin
+from datetime import datetime
+import json
+import re
 
 # ============================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE GENERALE
 # ============================================================
 
-URL_ARCHIVIO = "https://agricoltura.regione.campania.it/comunicati/comunicati.htm"
-DATABASE_URL = os.environ.get("DATABASE_URL")
-USER_AGENT = "Mozilla/5.0 News-Agricoltura-Campania"
+NOME_PROGETTO = "news-agricoltura-campania"
 
-# Gmail SMTP.
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-INTERVALLO_MINUTI = int(os.environ.get("INTERVALLO_MINUTI", "60"))
-EMAIL_MITTENTE = os.environ.get("EMAIL_MITTENTE")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
-EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINATARIO")
+URL_HOME = "https://agricoltura.regione.campania.it/home.htm"
 
-CATEGORIE_ARCHIVIO = (
-    "Comunicati Stampa",
-    "Comunicati",
-    "Bandi",
-    "Eventi",
-    "News",
+URL_ARCHIVIO = (
+    "https://agricoltura.regione.campania.it/comunicati/comunicati.htm"
 )
 
-MESI_ITALIANI = {
-    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4,
-    "maggio": 5, "giugno": 6, "luglio": 7, "agosto": 8,
-    "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
-}
+USER_AGENT = "Mozilla/5.0 News-Agricoltura-Campania"
 
-MESI_ARCHIVIO = {
-    "gen": 1, "feb": 2, "mar": 3, "apr": 4, "mag": 5, "giu": 6,
-    "lug": 7, "ago": 8, "set": 9, "ott": 10, "nov": 11, "dic": 12,
-    **MESI_ITALIANI,
-}
+INTERVALLO_CONTROLLO = 60
 
 
 # ============================================================
-# DATABASE
+# VARIABILI D'AMBIENTE
 # ============================================================
 
-def connetti_database():
-    if not DATABASE_URL:
-        raise RuntimeError("Variabile DATABASE_URL non configurata")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-    return psycopg2.connect(DATABASE_URL)
+EMAIL_DESTINATARIO = os.getenv("EMAIL_DESTINATARIO")
+EMAIL_MITTENTE = os.getenv("EMAIL_MITTENTE")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 
-def prepara_database():
-    conn = connetti_database()
-    cur = conn.cursor()
+# ============================================================
+# CONTROLLO CONFIGURAZIONE
+# ============================================================
+
+if not DATABASE_URL:
+    print("❌ DATABASE_URL non configurata")
+else:
+    print("✅ DATABASE_URL configurata")
+
+
+# ============================================================
+# VERIFICA COLLEGAMENTO DATABASE
+# ============================================================
+
+def verifica_database():
 
     try:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pubblicazioni_monitorate (
-                id SERIAL PRIMARY KEY,
-                titolo TEXT NOT NULL,
-                data_pubblicazione DATE,
-                categoria TEXT,
-                url TEXT NOT NULL UNIQUE,
-                descrizione TEXT,
-                testo_pagina TEXT,
-                ultimo_aggiornamento DATE,
-                documenti TEXT,
-                impronta TEXT NOT NULL,
-                prima_rilevazione TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                ultima_verifica TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
+
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM pubblicazioni_monitorate
+        """)
+
+        risultato = cur.fetchone()[0]
+
+        print("✅ Collegamento a Neon riuscito")
+        print("✅ Tabella pubblicazioni_monitorate presente")
+        print(
+            f"✅ Pubblicazioni attualmente nel database: "
+            f"{risultato}"
         )
 
-        cur.execute(
-            """
-            ALTER TABLE pubblicazioni_monitorate
-            ADD COLUMN IF NOT EXISTS testo_archivio TEXT
-            """
-        )
-
-        # Contiene l'impronta dell'ultima versione per la quale l'email
-        # di notifica è stata inviata con successo.
-        cur.execute(
-            """
-            ALTER TABLE pubblicazioni_monitorate
-            ADD COLUMN IF NOT EXISTS impronta_notificata TEXT
-            """
-        )
-
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
         cur.close()
         conn.close()
 
+        return True
 
-def database_ha_gia_dati():
-    conn = connetti_database()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT EXISTS (SELECT 1 FROM pubblicazioni_monitorate)")
-        return bool(cur.fetchone()[0])
-    finally:
-        cur.close()
-        conn.close()
+    except Exception as e:
 
-
-# ============================================================
-# EMAIL
-# ============================================================
-
-def configurazione_email_completa():
-    mancanti = []
-    if not EMAIL_MITTENTE:
-        mancanti.append("EMAIL_MITTENTE")
-    if not EMAIL_PASSWORD:
-        mancanti.append("EMAIL_PASSWORD")
-    if not EMAIL_DESTINATARIO:
-        mancanti.append("EMAIL_DESTINATARIO")
-    return mancanti
-
-
-def invia_email_notifica(pubblicazione, tipo):
-    mancanti = configurazione_email_completa()
-    if mancanti:
-        raise RuntimeError(
-            "Configurazione email incompleta. Variabili mancanti: "
-            + ", ".join(mancanti)
+        print(
+            f"❌ Errore collegamento database: {e}"
         )
 
-    if tipo == "nuova":
-        oggetto = f"[News Agricoltura Campania] Nuova pubblicazione: {pubblicazione['titolo']}"
-        intestazione = "È stata rilevata una nuova pubblicazione."
-    else:
-        oggetto = f"[News Agricoltura Campania] Pubblicazione aggiornata: {pubblicazione['titolo']}"
-        intestazione = "È stata rilevata una modifica a una pubblicazione già monitorata."
-
-    corpo = (
-        f"{intestazione}\n\n"
-        f"Titolo: {pubblicazione['titolo']}\n"
-        f"Categoria: {pubblicazione['categoria']}\n"
-        f"Data pubblicazione: {pubblicazione['data_pubblicazione'] or 'non rilevata'}\n"
-        f"Ultimo aggiornamento: {pubblicazione['ultimo_aggiornamento'] or 'non rilevato'}\n\n"
-        f"Testo nell'archivio:\n{pubblicazione['testo_archivio']}\n\n"
-        f"Pagina ufficiale:\n{pubblicazione['url']}\n\n"
-        f"Fonte:\n{URL_ARCHIVIO}\n"
-    )
-
-    messaggio = EmailMessage()
-    messaggio["Subject"] = oggetto
-    messaggio["From"] = EMAIL_MITTENTE
-    messaggio["To"] = EMAIL_DESTINATARIO
-    messaggio.set_content(corpo)
-
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-        server.login(EMAIL_MITTENTE, EMAIL_PASSWORD)
-        server.send_message(messaggio)
+        return False
 
 
 # ============================================================
-# ESTRAZIONE ARCHIVIO
+# SALVATAGGIO DI UNA PUBBLICAZIONE NEL DATABASE
 # ============================================================
 
-def analizza_link_archivio(link):
-    testo = " ".join(link.get_text(" ", strip=True).split())
-    if not testo:
-        return None
-
-    pattern = re.compile(
-        r"^\s*(?P<giorno>\d{1,2})\s+"
-        r"(?P<mese>gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|"
-        r"settembre|ottobre|novembre|dicembre|gen|feb|mar|apr|mag|giu|lug|ago|set|ott|nov|dic)\s+"
-        r"(?P<categoria>Comunicati Stampa|Comunicati|Bandi|Eventi|News)\b",
-        re.IGNORECASE,
-    )
-
-    match = pattern.match(testo)
-    if not match:
-        return None
-
-    giorno = int(match.group("giorno"))
-    mese_nome = match.group("mese").lower()
-    mese = MESI_ARCHIVIO.get(mese_nome)
-
-    if not mese:
-        return None
+def salva_pubblicazione_database(pubblicazione, url):
 
     try:
-        datetime(2000, mese, giorno)
-    except ValueError:
-        return None
 
-    categoria = match.group("categoria")
-    categoria = next(
-        (c for c in CATEGORIE_ARCHIVIO if c.lower() == categoria.lower()),
-        categoria,
-    )
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
 
-    return {
-        "categoria": categoria,
-        "testo_archivio": testo,
-        "data_archivio": (mese, giorno),
-    }
+        # ----------------------------------------------------
+        # DATI PRINCIPALI
+        # ----------------------------------------------------
 
-
-def estrai_pubblicazioni_archivio():
-    response = requests.get(
-        URL_ARCHIVIO,
-        timeout=20,
-        headers={"User-Agent": USER_AGENT},
-    )
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    risultati_per_url = {}
-
-    for link in soup.find_all("a", href=True):
-        dati_archivio = analizza_link_archivio(link)
-        if not dati_archivio:
-            continue
-
-        url_pubblicazione = urljoin(URL_ARCHIVIO, link["href"].strip())
-        parsed = urlparse(url_pubblicazione)
-
-        if parsed.scheme not in ("http", "https"):
-            continue
-        if parsed.netloc.lower() != "agricoltura.regione.campania.it":
-            continue
-
-        # Il frammento (#...) non identifica una pagina diversa.
-        url_pubblicazione = urlunparse(parsed._replace(fragment=""))
-
-        voce = risultati_per_url.setdefault(
-            url_pubblicazione,
-            {"url": url_pubblicazione, "voci_archivio": []},
+        titolo = pubblicazione.get(
+            "titolo",
+            ""
         )
 
-        voce_archivio = {
-            "categoria": dati_archivio["categoria"],
-            "testo": dati_archivio["testo_archivio"],
-            "data": dati_archivio["data_archivio"],
-        }
+        data_pubblicazione = pubblicazione.get(
+            "data_pubblicazione"
+        ) or None
 
-        if voce_archivio not in voce["voci_archivio"]:
-            voce["voci_archivio"].append(voce_archivio)
+        # ----------------------------------------------------
+        # CONVERSIONE DATA
+        # Da DD/MM/YYYY a oggetto date Python
+        # ----------------------------------------------------
 
-    risultati = []
-    for voce in risultati_per_url.values():
-        voci = sorted(
-            voce["voci_archivio"],
-            key=lambda item: (
-                item["data"][0],
-                item["data"][1],
-                item["categoria"],
-                item["testo"],
-            ),
-            reverse=True,
+        if data_pubblicazione:
+
+            data_pubblicazione = datetime.strptime(
+                data_pubblicazione,
+                "%d/%m/%Y"
+            ).date()
+
+        testo_pagina = pubblicazione.get(
+            "testo_pagina",
+            ""
         )
 
-        categorie = []
-        testi = []
-        for item in voci:
-            if item["categoria"] not in categorie:
-                categorie.append(item["categoria"])
-            testi.append(item["testo"])
-
-        risultati.append(
-            {
-                "url": voce["url"],
-                "categoria": ", ".join(categorie),
-                "testo_archivio": "\n".join(testi),
-            }
+        documenti = pubblicazione.get(
+            "documenti",
+            []
         )
 
-    if not risultati:
-        raise RuntimeError("Nessuna pubblicazione individuata nell'archivio")
-
-    return risultati
-
-
-# ============================================================
-# ESTRAZIONE PAGINA INDIVIDUALE
-# ============================================================
-
-def estrai_data_pubblicazione(testo):
-    match = re.search(r"\b(\d{2}/\d{2}/\d{4})\s*-\s*", testo)
-    if match:
-        return datetime.strptime(match.group(1), "%d/%m/%Y").date()
-
-    match = re.search(r"\b(\d{2}/\d{2}/\d{2})\s*-\s*", testo)
-    if match:
-        return datetime.strptime(match.group(1), "%d/%m/%y").date()
-
-    return None
-
-
-def estrai_ultimo_aggiornamento(testo):
-    pattern = re.compile(
-        r"ultimo aggiornamento\s+(\d{1,2})\s+([A-Za-zàèéìòù]+)\s+(\d{4})",
-        re.IGNORECASE,
-    )
-
-    match = pattern.search(testo)
-    if not match:
-        return None
-
-    giorno = int(match.group(1))
-    mese_nome = match.group(2).lower()
-    anno = int(match.group(3))
-    mese = MESI_ITALIANI.get(mese_nome)
-
-    if not mese:
-        return None
-
-    try:
-        return datetime(anno, mese, giorno).date()
-    except ValueError:
-        return None
-
-
-def estrai_documenti(soup, url_base):
-    estensioni = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip")
-
-    documenti = []
-    visti = set()
-
-    for link in soup.find_all("a", href=True):
-        href = link["href"].strip()
-        url_documento = urljoin(url_base, href)
-        percorso = urlparse(url_documento).path.lower()
-
-        if not percorso.endswith(estensioni):
-            continue
-        if url_documento in visti:
-            continue
-
-        visti.add(url_documento)
-        documenti.append(
-            {
-                "titolo": " ".join(link.get_text(" ", strip=True).split()),
-                "url": url_documento,
-            }
-        )
-
-    return documenti
-
-
-def estrai_titolo_pagina(soup):
-    for tag_name in ("h1", "h2", "h3"):
-        tag = soup.find(tag_name)
-        if tag:
-            titolo = " ".join(tag.get_text(" ", strip=True).split())
-            if titolo:
-                return titolo
-
-    if soup.title:
-        titolo = " ".join(soup.title.get_text(" ", strip=True).split())
-        if titolo:
-            return titolo
-
-    return ""
-
-
-def estrai_pubblicazione(dato_archivio):
-    url = dato_archivio["url"]
-
-    response = requests.get(
-        url,
-        timeout=20,
-        headers={"User-Agent": USER_AGENT},
-    )
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    testo_pagina = " ".join(soup.get_text(" ", strip=True).split())
-
-    titolo = estrai_titolo_pagina(soup)
-    data_pubblicazione = estrai_data_pubblicazione(testo_pagina)
-    ultimo_aggiornamento = estrai_ultimo_aggiornamento(testo_pagina)
-    documenti = estrai_documenti(soup, url)
-
-    if not titolo:
-        raise ValueError(f"Titolo non trovato nella pagina: {url}")
-
-    return {
-        "titolo": titolo,
-        "data_pubblicazione": data_pubblicazione,
-        "categoria": dato_archivio["categoria"],
-        "url": url,
-        "descrizione": dato_archivio["testo_archivio"],
-        "testo_archivio": dato_archivio["testo_archivio"],
-        "testo_pagina": testo_pagina,
-        "ultimo_aggiornamento": ultimo_aggiornamento,
-        "documenti": documenti,
-    }
-
-
-# ============================================================
-# IMPRONTA
-# ============================================================
-
-def calcola_impronta(pubblicazione):
-    documenti = json.dumps(
-        pubblicazione["documenti"],
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-    contenuto = "|".join(
-        [
-            pubblicazione["titolo"],
-            str(pubblicazione["data_pubblicazione"]),
-            pubblicazione["categoria"],
-            pubblicazione["testo_archivio"],
-            pubblicazione["testo_pagina"],
-            str(pubblicazione["ultimo_aggiornamento"]),
+        documenti = json.dumps(
             documenti,
-        ]
-    )
+            ensure_ascii=False
+        )
 
-    return hashlib.sha256(contenuto.encode("utf-8")).hexdigest()
+        # ----------------------------------------------------
+        # DATA ULTIMO AGGIORNAMENTO
+        # ----------------------------------------------------
 
+        ultimo_aggiornamento = pubblicazione.get(
+            "ultimo_aggiornamento"
+        ) or None
 
-# ============================================================
-# SALVATAGGIO, CONFRONTO E NOTIFICA
-# ============================================================
+        if ultimo_aggiornamento:
 
-def salva_pubblicazione(pubblicazione, invia_notifica=True):
-    impronta = calcola_impronta(pubblicazione)
-    pubblicazione["impronta"] = impronta
+            mesi = {
+                "gennaio": 1,
+                "febbraio": 2,
+                "marzo": 3,
+                "aprile": 4,
+                "maggio": 5,
+                "giugno": 6,
+                "luglio": 7,
+                "agosto": 8,
+                "settembre": 9,
+                "ottobre": 10,
+                "novembre": 11,
+                "dicembre": 12
+            }
 
-    conn = connetti_database()
-    cur = conn.cursor()
+            match_aggiornamento = re.search(
+                r"ultimo aggiornamento\s+(\d{1,2})\s+([a-zà]+)\s+(\d{4})",
+                ultimo_aggiornamento,
+                re.IGNORECASE
+            )
 
-    try:
+            if match_aggiornamento:
+
+                giorno = int(
+                    match_aggiornamento.group(1)
+                )
+
+                mese = mesi[
+                    match_aggiornamento.group(2).lower()
+                ]
+
+                anno = int(
+                    match_aggiornamento.group(3)
+                )
+
+                ultimo_aggiornamento = datetime(
+                    anno,
+                    mese,
+                    giorno
+                ).date()
+
+            print(
+                "ULTIMO AGGIORNAMENTO PRIMA DEL DATABASE:",
+                ultimo_aggiornamento
+            )
+
+            print(
+                "TIPO ULTIMO AGGIORNAMENTO:",
+                type(ultimo_aggiornamento)
+            )
+
+        # ----------------------------------------------------
+        # CONTROLLO DATA
+        # ----------------------------------------------------
+
+        print(
+            "DATA PRIMA DEL DATABASE:",
+            data_pubblicazione
+        )
+
+        print(
+            "TIPO DATA:",
+            type(data_pubblicazione)
+        )
+
+        # ----------------------------------------------------
+        # IMPRONTA DEL CONTENUTO
+        # ----------------------------------------------------
+
+        contenuto = (
+            titolo
+            + "|"
+            + str(data_pubblicazione)
+            + "|"
+            + testo_pagina
+            + "|"
+            + str(ultimo_aggiornamento)
+            + "|"
+            + documenti
+        )
+
+        impronta = hashlib.sha256(
+            contenuto.encode("utf-8")
+        ).hexdigest()
+
+        # ----------------------------------------------------
+        # CONTROLLO PUBBLICAZIONE GIÀ PRESENTE
+        # ----------------------------------------------------
+
         cur.execute(
             """
-            SELECT id, impronta, impronta_notificata
+            SELECT impronta
             FROM pubblicazioni_monitorate
             WHERE url = %s
             """,
-            (pubblicazione["url"],),
-        )
-        riga = cur.fetchone()
-
-        documenti_json = json.dumps(
-            pubblicazione["documenti"],
-            ensure_ascii=False,
-            sort_keys=True,
+            (url,)
         )
 
-        if riga:
-            id_record, impronta_database, impronta_notificata = riga
+        risultato = cur.fetchone()
 
-            if impronta_database == impronta:
+        # ----------------------------------------------------
+        # PUBBLICAZIONE GIÀ PRESENTE
+        # ----------------------------------------------------
+
+        if risultato:
+
+            impronta_esistente = risultato[0]
+            print("IMPRONTA CALCOLATA:", impronta)
+            print("IMPRONTA DATABASE:", impronta_esistente)
+            
+            # ------------------------------------------------
+            # PUBBLICAZIONE INVARIATA
+            # ------------------------------------------------
+            
+            if impronta_esistente == impronta:
+
+                print(
+                    "ℹ️ Pubblicazione già presente e invariata"
+                )
+
                 cur.execute(
                     """
                     UPDATE pubblicazioni_monitorate
                     SET ultima_verifica = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    WHERE url = %s
                     """,
-                    (id_record,),
+                    (url,)
                 )
+
                 conn.commit()
-                stato = "invariata"
+
+                cur.close()
+                conn.close()
+
+                return
+
+            # ------------------------------------------------
+            # PUBBLICAZIONE MODIFICATA
+            # ------------------------------------------------
+
             else:
+
+                print(
+                    "🔄 Pubblicazione già presente ma modificata"
+                )
+
                 cur.execute(
                     """
                     UPDATE pubblicazioni_monitorate
-                    SET titolo = %s,
+                    SET
+                        titolo = %s,
                         data_pubblicazione = %s,
-                        categoria = %s,
-                        descrizione = %s,
-                        testo_archivio = %s,
-                        testo_pagina = %s,
                         ultimo_aggiornamento = %s,
+                        testo_pagina = %s,
                         documenti = %s,
                         impronta = %s,
                         ultima_verifica = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    WHERE url = %s
                     """,
                     (
-                        pubblicazione["titolo"],
-                        pubblicazione["data_pubblicazione"],
-                        pubblicazione["categoria"],
-                        pubblicazione["descrizione"],
-                        pubblicazione["testo_archivio"],
-                        pubblicazione["testo_pagina"],
-                        pubblicazione["ultimo_aggiornamento"],
-                        documenti_json,
+                        titolo,
+                        data_pubblicazione,
+                        ultimo_aggiornamento,
+                        testo_pagina,
+                        documenti,
                         impronta,
-                        id_record,
-                    ),
-                )
-                conn.commit()
-                stato = "modificata"
-
-            if invia_notifica and EMAIL_MITTENTE and EMAIL_PASSWORD and EMAIL_DESTINATARIO:
-                if impronta_notificata != impronta:
-                    tipo_notifica = "nuova" if impronta_notificata is None else "modificata"
-                    invia_email_notifica(pubblicazione, tipo_notifica)
-                    cur.execute(
-                        """
-                        UPDATE pubblicazioni_monitorate
-                        SET impronta_notificata = %s
-                        WHERE id = %s
-                        """,
-                        (impronta, id_record),
+                        url
                     )
-                    conn.commit()
-                    print("✉️ Email di notifica inviata")
+                )
 
-            if stato == "invariata":
-                print("ℹ️ Pubblicazione già presente e invariata")
-            else:
-                print("🔄 Pubblicazione modificata e aggiornata")
+                conn.commit()
 
-            return stato
+                cur.close()
+                conn.close()
 
-        # Nuova URL.
-        # Se il database era già popolato, la nuova pubblicazione è una vera
-        # novità e viene notificata. Se il database è vuoto, la prima esecuzione
-        # costruisce la base iniziale senza inviare centinaia di email.
+                print(
+                    "✅ Pubblicazione aggiornata nel database"
+                )
+
+                return
+
+        # ----------------------------------------------------
+        # INSERIMENTO NEL DATABASE
+        # ----------------------------------------------------
+       
         cur.execute(
             """
-            INSERT INTO pubblicazioni_monitorate (
+            INSERT INTO pubblicazioni_monitorate
+            (
                 titolo,
                 data_pubblicazione,
-                categoria,
-                url,
-                descrizione,
-                testo_archivio,
-                testo_pagina,
                 ultimo_aggiornamento,
+                url,
+                testo_pagina,
                 documenti,
-                impronta,
-                impronta_notificata
+                impronta
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO NOTHING
             """,
             (
-                pubblicazione["titolo"],
-                pubblicazione["data_pubblicazione"],
-                pubblicazione["categoria"],
-                pubblicazione["url"],
-                pubblicazione["descrizione"],
-                pubblicazione["testo_archivio"],
-                pubblicazione["testo_pagina"],
-                pubblicazione["ultimo_aggiornamento"],
-                documenti_json,
-                impronta,
-                None,
-            ),
+                titolo,
+                data_pubblicazione,
+                ultimo_aggiornamento,
+                url,
+                testo_pagina,
+                documenti,
+                impronta
+            )
         )
+
         conn.commit()
 
-        stato = "nuova"
-
-        if invia_notifica:
-            invia_email_notifica(pubblicazione, "nuova")
-            cur.execute(
-                """
-                UPDATE pubblicazioni_monitorate
-                SET impronta_notificata = %s
-                WHERE url = %s
-                """,
-                (impronta, pubblicazione["url"]),
-            )
-            conn.commit()
-            print("✉️ Email di notifica inviata")
-        else:
-            # Prima costruzione della base: niente email.
-            cur.execute(
-                """
-                UPDATE pubblicazioni_monitorate
-                SET impronta_notificata = %s
-                WHERE url = %s
-                """,
-                (impronta, pubblicazione["url"]),
-            )
-            conn.commit()
-
-        print("🆕 Nuova pubblicazione inserita")
-        return stato
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
         cur.close()
         conn.close()
 
+        print(
+            "✅ Pubblicazione salvata nel database"
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore nel salvataggio nel database: {e}"
+        )
+
 
 # ============================================================
-# CICLO DI ELABORAZIONE
+# ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
 # ============================================================
 
-def testa_pagine_archivio():
-    pubblicazioni_archivio = estrai_pubblicazioni_archivio()
-    print(f"Pubblicazioni individuate nell'archivio: {len(pubblicazioni_archivio)}")
+def estrai_pubblicazioni_archivio():
 
-    risultati = []
-    errori = []
+    try:
 
-    # Se il DB è vuoto, questa esecuzione è la costruzione della base iniziale.
-    # Non inviamo una email per ogni vecchia pubblicazione già presente nel sito.
-    prima_esecuzione = not database_ha_gia_dati()
+        headers = {
+            "User-Agent": USER_AGENT
+        }
 
-    for dato_archivio in pubblicazioni_archivio:
-        try:
-            pubblicazione = estrai_pubblicazione(dato_archivio)
-            stato = salva_pubblicazione(
-                pubblicazione,
-                invia_notifica=not prima_esecuzione,
+        response = requests.get(
+            URL_ARCHIVIO,
+            headers=headers,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        pubblicazioni = []
+
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
+
+            titolo = link.get_text(
+                " ",
+                strip=True
             )
-            risultati.append(
+
+            if not titolo:
+                continue
+
+            url = urljoin(
+                URL_ARCHIVIO,
+                link["href"]
+            )
+
+            # ------------------------------------------------
+            # SOLO COLLEGAMENTI NELL'AREA COMUNICATI
+            # ------------------------------------------------
+
+            if "/comunicati/" not in url:
+                continue
+
+            # ------------------------------------------------
+            # ESCLUDIAMO LA PAGINA PRINCIPALE
+            # ------------------------------------------------
+
+            if url == URL_ARCHIVIO:
+                continue
+
+            # ------------------------------------------------
+            # ESCLUDIAMO GLI ARCHIVI ANNUALI
+            # ------------------------------------------------
+
+            nome_file = (
+                url.rstrip("/")
+                .split("/")[-1]
+                .lower()
+            )
+
+            if nome_file.startswith(
+                "comunicati_"
+            ):
+                continue
+
+            # ------------------------------------------------
+            # EVITIAMO DUPLICATI
+            # ------------------------------------------------
+
+            if any(
+                p["url"] == url
+                for p in pubblicazioni
+            ):
+                continue
+
+            pubblicazioni.append(
                 {
-                    "url": pubblicazione["url"],
-                    "titolo": pubblicazione["titolo"],
-                    "stato": stato,
+                    "titolo": titolo,
+                    "url": url
                 }
             )
-        except Exception as e:
-            errore = {"url": dato_archivio["url"], "errore": str(e)}
-            errori.append(errore)
-            print(f"❌ Errore nella pubblicazione {dato_archivio['url']}: {e}")
 
-    return risultati, errori, prima_esecuzione
+        print(
+            "============================================"
+        )
+
+        print(
+            "📋 ESTRAZIONE ARCHIVIO"
+        )
+
+        print(
+            f"✅ Pubblicazioni individuate: "
+            f"{len(pubblicazioni)}"
+        )
+
+        for i, pubblicazione in enumerate(
+            pubblicazioni,
+            start=1
+        ):
+
+            print(
+                f"{i}. "
+                f"{pubblicazione['titolo']}"
+            )
+
+            print(
+                f"   {pubblicazione['url']}"
+            )
+
+        print(
+            "============================================"
+        )
+
+        return pubblicazioni
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore estrazione archivio: {e}"
+        )
+
+        return []
 
 
 # ============================================================
-# CICLO AUTOMATICO
+# TEST ESTRAZIONE ARCHIVIO
 # ============================================================
 
-_monitoraggio_lock = threading.Lock()
-_stato_monitoraggio = {
-    "ultimo_avvio": None,
-    "ultima_fine": None,
-    "ultima_esecuzione": None,
-    "ultimo_errore": None,
-}
+# ============================================================
+# ESTRAZIONE ELENCO PUBBLICAZIONI DALL'ARCHIVIO
+# ============================================================
 
-def esegui_monitoraggio():
-    if not _monitoraggio_lock.acquire(blocking=False):
-        print("ℹ️ Monitoraggio già in esecuzione")
+def estrai_pubblicazioni_archivio():
+
+    try:
+
+        headers = {
+            "User-Agent": USER_AGENT
+        }
+
+        response = requests.get(
+            URL_ARCHIVIO,
+            headers=headers,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        pubblicazioni = []
+
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
+
+            url = urljoin(
+                URL_ARCHIVIO,
+                link["href"]
+            )
+
+            # ------------------------------------------------
+            # SOLO COLLEGAMENTI NELL'AREA COMUNICATI
+            # ------------------------------------------------
+
+            if "/comunicati/" not in url:
+                continue
+
+            # ------------------------------------------------
+            # ESCLUDIAMO LA PAGINA PRINCIPALE
+            # ------------------------------------------------
+
+            if url.rstrip("/") == URL_ARCHIVIO.rstrip("/"):
+                continue
+
+            # ------------------------------------------------
+            # ESCLUDIAMO GLI ARCHIVI ANNUALI
+            # ------------------------------------------------
+
+            nome_file = (
+                url.rstrip("/")
+                .split("/")[-1]
+                .lower()
+            )
+
+            if nome_file.startswith("comunicati_"):
+                continue
+
+            # ------------------------------------------------
+            # IL TESTO DEL LINK È IL TITOLO DELL'ARCHIVIO
+            # ------------------------------------------------
+
+            titolo = link.get_text(
+                " ",
+                strip=True
+            )
+
+            if not titolo:
+                continue
+
+            # ------------------------------------------------
+            # EVITIAMO DUPLICATI
+            # ------------------------------------------------
+
+            if any(
+                p["url"] == url
+                for p in pubblicazioni
+            ):
+                continue
+
+            pubblicazioni.append(
+                {
+                    "titolo": titolo,
+                    "url": url
+                }
+            )
+
+        print(
+            "============================================"
+        )
+
+        print(
+            "📋 ESTRAZIONE ARCHIVIO"
+        )
+
+        print(
+            f"✅ Pubblicazioni individuate: "
+            f"{len(pubblicazioni)}"
+        )
+
+        for i, pubblicazione in enumerate(
+            pubblicazioni,
+            start=1
+        ):
+
+            print(
+                f"{i}. "
+                f"{pubblicazione['titolo']}"
+            )
+
+            print(
+                f"   {pubblicazione['url']}"
+            )
+
+        print(
+            "============================================"
+        )
+
+        return pubblicazioni
+
+    except Exception as e:
+
+        print(
+            "❌ Errore durante l'estrazione "
+            f"dell'archivio: {e}"
+        )
+
+        return []
+
+
+# ============================================================
+# LETTURA PAGINA INDIVIDUALE DELLA PUBBLICAZIONE
+# ============================================================
+
+def estrai_dati_pubblicazione(url):
+
+    try:
+
+        headers = {
+            "User-Agent": USER_AGENT
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        # ----------------------------------------------------
+        # TITOLO
+        # ----------------------------------------------------
+
+        h1 = soup.find("h1")
+
+        titolo = (
+            h1.get_text(
+                " ",
+                strip=True
+            )
+            if h1
+            else ""
+        )
+
+        # ----------------------------------------------------
+        # TESTO COMPLETO DELLA PAGINA
+        # ----------------------------------------------------
+
+        testo_pagina = soup.get_text(
+            " ",
+            strip=True
+        )
+
+        # ----------------------------------------------------
+        # DATA DI PUBBLICAZIONE
+        # ----------------------------------------------------
+
+        data_pubblicazione = ""
+
+        match_data = re.search(
+            r"\b(\d{2}/\d{2}/\d{2,4})\s*-\s*Si comunica",
+            testo_pagina,
+            re.IGNORECASE
+        )
+
+        if match_data:
+
+            data_pubblicazione = (
+                match_data.group(1)
+            )
+
+        # ----------------------------------------------------
+        # DOCUMENTI / LINK
+        # ----------------------------------------------------
+
+        documenti = []
+
+        for link in soup.find_all(
+            "a",
+            href=True
+        ):
+
+            href = urljoin(
+                url,
+                link["href"]
+            )
+
+            testo_link = link.get_text(
+                " ",
+                strip=True
+            )
+
+            if href.lower().endswith(
+                (
+                    ".pdf",
+                    ".doc",
+                    ".docx",
+                    ".xls",
+                    ".xlsx"
+                )
+            ):
+
+                documenti.append(
+                    {
+                        "titolo": testo_link,
+                        "url": href
+                    }
+                )
+
+        # ----------------------------------------------------
+        # DATA ULTIMO AGGIORNAMENTO
+        # ----------------------------------------------------
+
+        ultimo_aggiornamento = ""
+
+        for elemento in soup.find_all(
+            string=True
+        ):
+
+            testo = elemento.strip().lower()
+
+            if "ultimo aggiornamento" in testo:
+
+                ultimo_aggiornamento = (
+                    elemento.strip()
+                )
+
+                break
+
+        # ----------------------------------------------------
+        # RISULTATO
+        # ----------------------------------------------------
+
+        return {
+            "titolo": titolo,
+            "data_pubblicazione": data_pubblicazione,
+            "testo_pagina": testo_pagina,
+            "ultimo_aggiornamento": ultimo_aggiornamento,
+            "documenti": documenti
+        }
+
+    except Exception as e:
+
+        print(
+            f"❌ Errore nella pagina {url}: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# TEST LETTURA PAGINA INDIVIDUALE
+# ============================================================
+
+def testa_pagina_individuale():
+
+    pubblicazioni = (
+        estrai_pubblicazioni_archivio()
+    )
+
+    if not pubblicazioni:
+
+        print(
+            "❌ Nessuna pubblicazione disponibile"
+        )
+
         return
 
-    _stato_monitoraggio["ultimo_avvio"] = datetime.now().isoformat()
-    try:
-        risultati, errori, prima_esecuzione = testa_pagine_archivio()
-        _stato_monitoraggio["ultima_esecuzione"] = {
-            "prima_esecuzione": prima_esecuzione,
-            "pubblicazioni_elaborate": len(risultati),
-            "errori": errori,
-        }
-        _stato_monitoraggio["ultimo_errore"] = None if not errori else "Una o più pubblicazioni non sono state elaborate"
+    # --------------------------------------------------------
+    # PRIMO TEST
+    # --------------------------------------------------------
+
+    prima = pubblicazioni[0]
+
+    print(
+        "============================================"
+    )
+
+    print(
+        "🔎 TEST PAGINA INDIVIDUALE"
+    )
+
+    print(
+        f"Titolo archivio: "
+        f"{prima['titolo']}"
+    )
+
+    print(
+        f"URL: {prima['url']}"
+    )
+
+    dati = estrai_dati_pubblicazione(
+        prima["url"]
+    )
+
+    if dati:
+
         print(
-            f"✅ Monitoraggio completato: {len(risultati)} elaborate, "
-            f"{len(errori)} errori"
+            "--------------------------------------------"
         )
-    except Exception as e:
-        _stato_monitoraggio["ultima_esecuzione"] = None
-        _stato_monitoraggio["ultimo_errore"] = str(e)
-        print(f"❌ Errore del ciclo di monitoraggio: {e}")
-    finally:
-        _stato_monitoraggio["ultima_fine"] = datetime.now().isoformat()
-        _monitoraggio_lock.release()
 
-def ciclo_automatico():
-    while True:
-        esegui_monitoraggio()
-        time.sleep(max(1, INTERVALLO_MINUTI) * 60)
+        print(
+            f"Titolo pagina: "
+            f"{dati['titolo']}"
+        )
+
+        print(
+            f"Data pubblicazione: "
+            f"{dati['data_pubblicazione']}"
+        )
+
+        print(
+            f"Testo pagina: "
+            f"{len(dati['testo_pagina'])} caratteri"
+        )
+
+        print(
+            f"Documenti trovati: "
+            f"{len(dati['documenti'])}"
+        )
+
+        print(
+            f"Ultimo aggiornamento: "
+            f"{dati['ultimo_aggiornamento']}"
+        )
+
+        for documento in dati["documenti"]:
+
+            print(
+                f"Documento: "
+                f"{documento['titolo']} "
+                f"→ {documento['url']}"
+            )
+
+        salva_pubblicazione_database(
+            dati,
+            prima["url"]
+        )
+
+    print(
+        "============================================"
+    )
 
 
 # ============================================================
-# FLASK
+# ESECUZIONE TEST
 # ============================================================
 
-app = Flask(__name__)
+testa_pagina_individuale()
 
 
-@app.route("/")
-def home():
-    return jsonify(
-        {
-            "progetto": "News Agricoltura Campania",
-            "stato": "attivo",
-            "fonte": URL_ARCHIVIO,
-            "notifiche": "email Gmail",
-            "intervallo_minuti": INTERVALLO_MINUTI,
-            "monitoraggio": _stato_monitoraggio,
-        }
-    )
+# ============================================================
+# AVVIO
+# ============================================================
 
+verifica_database()
 
-@app.route("/test")
-def test():
-    prepara_database()
-    risultati, errori, prima_esecuzione = testa_pagine_archivio()
+print(
+    f"✅ Progetto: {NOME_PROGETTO}"
+)
 
-    return jsonify(
-        {
-            "stato": "ok" if not errori else "completato_con_errori",
-            "prima_esecuzione": prima_esecuzione,
-            "pubblicazioni_elaborate": len(risultati),
-            "errori": errori,
-        }
-    )
+print(
+    f"✅ Fonte ufficiale: {URL_HOME}"
+)
 
+print(
+    f"✅ Archivio: {URL_ARCHIVIO}"
+)
 
-@app.route("/test-email")
-def test_email():
-    mancanti = configurazione_email_completa()
-    if mancanti:
-        return jsonify(
-            {
-                "stato": "errore",
-                "messaggio": "Configurazione email incompleta",
-                "variabili_mancanti": mancanti,
-            }
-        ), 500
-
-    pubblicazione_test = {
-        "titolo": "Test notifiche - News Agricoltura Campania",
-        "categoria": "Test",
-        "data_pubblicazione": datetime.now().date(),
-        "ultimo_aggiornamento": datetime.now().date(),
-        "testo_archivio": "Questo è un messaggio di prova del sistema di notifica.",
-        "url": URL_ARCHIVIO,
-    }
-
-    try:
-        invia_email_notifica(pubblicazione_test, "nuova")
-        return jsonify(
-            {
-                "stato": "ok",
-                "messaggio": "Email di prova inviata correttamente",
-                "destinatario": EMAIL_DESTINATARIO,
-            }
-        )
-    except Exception as e:
-        return jsonify(
-            {
-                "stato": "errore",
-                "messaggio": str(e),
-            }
-        ), 500
-
-
-if __name__ == "__main__":
-    prepara_database()
-
-    thread = threading.Thread(target=ciclo_automatico, daemon=True)
-    thread.start()
-
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-    )
+print(
+    f"✅ Intervallo controllo: "
+    f"{INTERVALLO_CONTROLLO} secondi"
+)
