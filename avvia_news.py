@@ -256,7 +256,6 @@ def salva_pubblicazione_database(pubblicazione, url):
         if risultato:
 
             impronta_esistente = risultato[0]
-
             # ------------------------------------------------
             # PUBBLICAZIONE INVARIATA
             # ------------------------------------------------
