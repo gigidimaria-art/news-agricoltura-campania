@@ -10,7 +10,6 @@ from datetime import datetime
 import json
 import re
 
-
 # ============================================================
 # CONFIGURAZIONE GENERALE
 # ============================================================
@@ -256,10 +255,13 @@ def salva_pubblicazione_database(pubblicazione, url):
         if risultato:
 
             impronta_esistente = risultato[0]
+            print("IMPRONTA CALCOLATA:", impronta)
+            print("IMPRONTA DATABASE:", impronta_esistente)
+            
             # ------------------------------------------------
             # PUBBLICAZIONE INVARIATA
             # ------------------------------------------------
-
+            
             if impronta_esistente == impronta:
 
                 print(
